@@ -1,0 +1,12 @@
+.dart_tool/
+.build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub/
+build/
+pubspec.lock
+
+# Android release signing (local only)
+android/key.properties
+android/upload-keystore.jks
