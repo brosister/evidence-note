@@ -1,43 +1,56 @@
 # evidence_note
 
-증거노트(Evidence Note) Flutter 앱 초안입니다.
+증거노트(Evidence Note) 앱 작업 폴더입니다.
 
-## 앱 컨셉
-- 개인 약속 / 거래 / 정산 기록 저장
-- 저장 시점 기준 타임스탬프 / 고유 ID / 해시 / 기기 정보 생성
-- 사진 / 음성 / 서명 첨부
-- 상대 연락처 연동
+## 앱 개요
+증거노트는 개인 약속, 거래, 차용, 반납, 정산 기록을
+사진 / 음성 / 서명 / 타임라인 중심으로 정리하는 Flutter 앱입니다.
+
+핵심 방향:
+- 약속/거래를 그냥 메모하지 않고 증거 느낌으로 정리
+- 저장 시점 정보, 고유 ID, 해시, 기기 요약 정보 생성
 - 진행중 / 완료됨 / 미해결 상태 관리
-- 타임라인 중심 확인
-- PDF / 공유 기능
-- 후속 알림 기반 재방문 유도
-- 미회수 금액 / 지연 손해 추정 표시
+- 미회수 금액 / 지연 손해 추정
+- PDF 생성 / 공유 / 후속 알림
 
-## 현재 반영 범위
-- Android / iOS 기본 프로젝트 구조
-- bundle id / package name: `com.brosister.evidencenote`
-- 한국어 / 영어 / 일본어 / 중국어(간체) iOS 표시명 리소스 추가
+## 현재 상태
+- Android / iOS 기본 프로젝트 구조 생성 완료
+- package / bundle id: `com.brosister.evidencenote`
+- iOS 표시명 리소스 포함 (`en`, `ko`, `ja`, `zh-Hans`)
 - `Info.plist` 기본 `CFBundleName` / `CFBundleDisplayName` 유지
-- 연락처 / 마이크 / 사진 접근 권한 문구 추가
-- 로컬 저장 기반 CRUD 초안
-- 타임라인 / 증거 요약 / 손해 추정 UI 초안
+- 연락처 / 사진 / 마이크 권한 문구 반영
+- 로컬 저장 기반 CRUD 초안 반영
+- 타임라인 / 증거 요약 / 손해 추정 UI 초안 반영
+- 공용 모델 / 저장소 / 알림 / 포맷터 분리 시작
 
-## 사용 예정 패키지
-- `shared_preferences`
-- `flutter_contacts`
-- `image_picker`
-- `record`
-- `signature`
-- `pdf`
-- `printing`
-- `share_plus`
-- `crypto`
-- `uuid`
+## 주요 문서
+- `docs/APP_COPY.md`
+- `docs/PRIVACY_POLICY_DRAFT.md`
+- `docs/MVP_CHECKLIST.md`
 
-## 다음 작업 권장
-1. 실제 브랜딩 로고 교체
-2. `flutter pub get`
-3. iOS `pod install`
-4. 디바이스 빌드 확인
-5. PDF/공유/알림 세부 동작 검수
-6. 앱소개 랜딩/정책 페이지 연결
+## 현재 구현 초안 범위
+- 기록 생성 / 수정 / 삭제
+- 제목 / 상대 이름 / 금액 / 날짜 / 메모
+- 현재 시간 저장 / 직접 날짜 입력
+- 연락처 연동 진입
+- 사진 첨부
+- 음성 녹음 진입
+- 간단 서명 진입
+- 저장 시 타임스탬프 / 고유 ID / 해시 생성
+- 내 약속 리스트
+- 타임라인 탭
+- PDF 생성 진입
+- 시스템 공유 진입
+
+## 다음 우선 작업
+1. 대표님 실빌드 검증
+2. 플러그인/권한 실제 기기 동작 수정
+3. 상세 페이지 분리
+4. 알림 YES/NO 액션 개선
+5. PDF/공유 결과물 디자인 개선
+6. 실제 앱 아이콘/스플래시 자산 교체
+7. 개인정보처리방침 URL / 회사홈피 연동
+
+## 비고
+- 현재 환경에서는 Flutter CLI가 없어 `flutter pub get` / `pod install` / 실제 빌드 검증은 미실행 상태
+- 대표님이 실빌드 진행 후 나온 에러 기준으로 바로 후속 수정 가능
