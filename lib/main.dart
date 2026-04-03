@@ -9,22 +9,21 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
-import 'package:fluttertoast/fluttertoast.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:record/record.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:signature/signature.dart';
 import 'package:uuid/uuid.dart';
 
-const _kRecordsKey = 'evidence_note_records_v1';
-const _kNotificationChannelId = 'promise_followups';
-const _kNotificationChannelName = 'Promise follow-ups';
+import 'models/evidence_models.dart';
+import 'services/evidence_repository.dart';
+import 'services/reminder_service.dart';
+import 'utils/app_formatters.dart';
+
 const _uuid = Uuid();
 
 Future<void> main() async {
@@ -373,9 +372,9 @@ class _PromiseListTab extends StatelessWidget {
                     spacing: 8,
                     runSpacing: 8,
                     children: [
-                      _pill(record.status.label, record.status.color.withValues(alpha: 0.14), record.status.color),
-                      _pill(record.counterpartyName, const Color(0xFFF0F4FF), const Color(0xFF3457F1)),
-                      _pill(formatDateTime(record.eventAt), const Color(0xFFF7F8FB), const Color(0xFF66718F)),
+                      buildPill(record.status.label, record.status.color.withValues(alpha: 0.14), record.status.color),
+                      buildPill(record.counterpartyName, const Color(0xFFF0F4FF), const Color(0xFF3457F1)),
+                      buildPill(formatDateTime(record.eventAt), const Color(0xFFF7F8FB), const Color(0xFF66718F)),
                     ],
                   ),
                   if (record.amount != null) ...[
@@ -555,7 +554,7 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
     _memoController = TextEditingController(text: existing?.memo ?? '');
     _counterpartyController = TextEditingController(text: existing?.counterpartyName ?? '');
     _contactController = TextEditingController(text: existing?.contactLabel ?? '');
-    _deviceController = TextEditingController(text: existing?.deviceSummary ?? _defaultDeviceSummary());
+    _deviceController = TextEditingController(text: existing?.deviceSummary ?? defaultDeviceSummary());
     _lossRateController = TextEditingController(text: existing?.dailyLossRate.toStringAsFixed(4) ?? '0.0008');
     _useCurrentTime = existing == null;
     _eventAt = existing?.eventAt ?? DateTime.now();
@@ -783,7 +782,7 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
     final now = DateTime.now();
     final eventAt = _useCurrentTime ? now : _eventAt;
     final amount = double.tryParse(_amountController.text.replaceAll(',', '').trim());
-    final deviceSummary = _deviceController.text.trim().isEmpty ? _defaultDeviceSummary() : _deviceController.text.trim();
+    final deviceSummary = _deviceController.text.trim().isEmpty ? defaultDeviceSummary() : _deviceController.text.trim();
     final proofId = existing?.proofId ?? 'PROOF-${now.millisecondsSinceEpoch}';
     final payload = {
       'title': _titleController.text.trim(),
@@ -947,7 +946,7 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _textField(_deviceController, '기기 정보', hint: _defaultDeviceSummary()),
+                  _textField(_deviceController, '기기 정보', hint: defaultDeviceSummary()),
                   const SizedBox(height: 12),
                   _textField(_lossRateController, '일 손해 추정 비율', keyboardType: const TextInputType.numberWithOptions(decimal: true)),
                   const SizedBox(height: 10),
@@ -1090,330 +1089,4 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(18), borderSide: BorderSide.none),
     );
   }
-}
-
-class EvidenceRepository {
-  SharedPreferences? _prefs;
-
-  Future<void> init() async {
-    _prefs = await SharedPreferences.getInstance();
-  }
-
-  Future<List<EvidenceRecord>> loadRecords() async {
-    final raw = _prefs?.getString(_kRecordsKey);
-    if (raw == null || raw.isEmpty) return const [];
-    final jsonList = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
-    return jsonList.map(EvidenceRecord.fromJson).toList();
-  }
-
-  Future<void> saveRecord(EvidenceRecord record) async {
-    final records = await loadRecords();
-    final next = [...records.where((item) => item.id != record.id), record]
-      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-    await _prefs?.setString(_kRecordsKey, jsonEncode(next.map((e) => e.toJson()).toList()));
-  }
-
-  Future<void> deleteRecord(String id) async {
-    final records = await loadRecords();
-    final next = records.where((item) => item.id != id).toList();
-    await _prefs?.setString(_kRecordsKey, jsonEncode(next.map((e) => e.toJson()).toList()));
-  }
-}
-
-class ReminderService {
-  ReminderService._();
-
-  static final ReminderService instance = ReminderService._();
-  final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();
-
-  Future<void> init() async {
-    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
-    const ios = DarwinInitializationSettings();
-    await _plugin.initialize(const InitializationSettings(android: android, iOS: ios));
-
-    await _plugin
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-        ?.createNotificationChannel(
-          const AndroidNotificationChannel(
-            _kNotificationChannelId,
-            _kNotificationChannelName,
-            importance: Importance.high,
-          ),
-        );
-
-    await _plugin
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-        ?.requestNotificationsPermission();
-    await _plugin
-        .resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>()
-        ?.requestPermissions(alert: true, badge: true, sound: true);
-  }
-
-  Future<void> schedule(EvidenceRecord record) async {
-    await _plugin.cancel(record.notificationId);
-    await _plugin.show(
-      record.notificationId,
-      '오늘 약속 지켜졌나요?',
-      record.amount != null && record.amount! > 0 ? '돈 받으셨나요? ${record.title}' : '진행 상태를 확인해 주세요. ${record.title}',
-      const NotificationDetails(
-        android: AndroidNotificationDetails(_kNotificationChannelId, _kNotificationChannelName, importance: Importance.high),
-        iOS: DarwinNotificationDetails(),
-      ),
-    );
-  }
-
-  Future<void> cancel(int id) => _plugin.cancel(id);
-}
-
-class EvidenceRecord {
-  const EvidenceRecord({
-    required this.id,
-    required this.proofId,
-    required this.title,
-    required this.amount,
-    required this.eventAt,
-    required this.memo,
-    required this.counterpartyName,
-    required this.contactId,
-    required this.contactLabel,
-    required this.createdAt,
-    required this.updatedAt,
-    required this.status,
-    required this.proofHash,
-    required this.deviceSummary,
-    required this.attachments,
-    required this.timeline,
-    required this.dailyLossRate,
-    required this.notificationId,
-  });
-
-  final String id;
-  final String proofId;
-  final String title;
-  final double? amount;
-  final DateTime eventAt;
-  final String memo;
-  final String counterpartyName;
-  final String? contactId;
-  final String contactLabel;
-  final DateTime createdAt;
-  final DateTime updatedAt;
-  final PromiseStatus status;
-  final String proofHash;
-  final String deviceSummary;
-  final List<AttachmentItem> attachments;
-  final List<TimelineEvent> timeline;
-  final double dailyLossRate;
-  final int notificationId;
-
-  factory EvidenceRecord.preview({required double amount, required DateTime eventAt, required double dailyLossRate}) {
-    return EvidenceRecord(
-      id: 'preview',
-      proofId: 'preview',
-      title: 'preview',
-      amount: amount,
-      eventAt: eventAt,
-      memo: '',
-      counterpartyName: '',
-      contactId: null,
-      contactLabel: '',
-      createdAt: DateTime.now(),
-      updatedAt: DateTime.now(),
-      status: PromiseStatus.inProgress,
-      proofHash: '',
-      deviceSummary: '',
-      attachments: const [],
-      timeline: const [],
-      dailyLossRate: dailyLossRate,
-      notificationId: 0,
-    );
-  }
-
-  factory EvidenceRecord.fromJson(Map<String, dynamic> json) => EvidenceRecord(
-        id: json['id'] as String,
-        proofId: json['proofId'] as String,
-        title: json['title'] as String,
-        amount: (json['amount'] as num?)?.toDouble(),
-        eventAt: DateTime.parse(json['eventAt'] as String),
-        memo: json['memo'] as String? ?? '',
-        counterpartyName: json['counterpartyName'] as String? ?? '',
-        contactId: json['contactId'] as String?,
-        contactLabel: json['contactLabel'] as String? ?? '',
-        createdAt: DateTime.parse(json['createdAt'] as String),
-        updatedAt: DateTime.parse(json['updatedAt'] as String),
-        status: PromiseStatus.values.byName(json['status'] as String),
-        proofHash: json['proofHash'] as String? ?? '',
-        deviceSummary: json['deviceSummary'] as String? ?? '',
-        attachments: (json['attachments'] as List? ?? const [])
-            .map((item) => AttachmentItem.fromJson(Map<String, dynamic>.from(item as Map)))
-            .toList(),
-        timeline: (json['timeline'] as List? ?? const [])
-            .map((item) => TimelineEvent.fromJson(Map<String, dynamic>.from(item as Map)))
-            .toList(),
-        dailyLossRate: (json['dailyLossRate'] as num?)?.toDouble() ?? 0.0008,
-        notificationId: json['notificationId'] as int? ?? 0,
-      );
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'proofId': proofId,
-        'title': title,
-        'amount': amount,
-        'eventAt': eventAt.toIso8601String(),
-        'memo': memo,
-        'counterpartyName': counterpartyName,
-        'contactId': contactId,
-        'contactLabel': contactLabel,
-        'createdAt': createdAt.toIso8601String(),
-        'updatedAt': updatedAt.toIso8601String(),
-        'status': status.name,
-        'proofHash': proofHash,
-        'deviceSummary': deviceSummary,
-        'attachments': attachments.map((e) => e.toJson()).toList(),
-        'timeline': timeline.map((e) => e.toJson()).toList(),
-        'dailyLossRate': dailyLossRate,
-        'notificationId': notificationId,
-      };
-}
-
-enum PromiseStatus {
-  inProgress('진행중', Color(0xFF3457F1)),
-  completed('완료됨', Color(0xFF16865A)),
-  unresolved('미해결', Color(0xFFD14D1F));
-
-  const PromiseStatus(this.label, this.color);
-  final String label;
-  final Color color;
-}
-
-enum AttachmentType {
-  photo('사진', Icons.photo_rounded),
-  audio('음성', Icons.mic_rounded),
-  signature('서명', Icons.draw_rounded);
-
-  const AttachmentType(this.label, this.icon);
-  final String label;
-  final IconData icon;
-}
-
-class AttachmentItem {
-  const AttachmentItem({required this.type, required this.path});
-
-  factory AttachmentItem.photo(String path) => AttachmentItem(type: AttachmentType.photo, path: path);
-  factory AttachmentItem.audio(String path) => AttachmentItem(type: AttachmentType.audio, path: path);
-  factory AttachmentItem.signature(String path) => AttachmentItem(type: AttachmentType.signature, path: path);
-
-  final AttachmentType type;
-  final String path;
-
-  String get label => type.label;
-
-  factory AttachmentItem.fromJson(Map<String, dynamic> json) => AttachmentItem(
-        type: AttachmentType.values.byName(json['type'] as String),
-        path: json['path'] as String,
-      );
-
-  Map<String, dynamic> toJson() => {
-        'type': type.name,
-        'path': path,
-      };
-}
-
-enum TimelineEventType {
-  created('생성', Icons.add_task_rounded),
-  edited('수정', Icons.edit_rounded),
-  attachmentAdded('증거 첨부', Icons.attachment_rounded),
-  statusChanged('상태 변경', Icons.flag_rounded),
-  reminderAnswered('알림 응답', Icons.notifications_active_rounded);
-
-  const TimelineEventType(this.label, this.icon);
-  final String label;
-  final IconData icon;
-}
-
-class TimelineEvent {
-  const TimelineEvent({required this.type, required this.description, required this.createdAt});
-
-  final TimelineEventType type;
-  final String description;
-  final DateTime createdAt;
-
-  factory TimelineEvent.create(TimelineEventType type, String description, DateTime createdAt) {
-    return TimelineEvent(type: type, description: description, createdAt: createdAt);
-  }
-
-  factory TimelineEvent.fromJson(Map<String, dynamic> json) => TimelineEvent(
-        type: TimelineEventType.values.byName(json['type'] as String),
-        description: json['description'] as String,
-        createdAt: DateTime.parse(json['createdAt'] as String),
-      );
-
-  Map<String, dynamic> toJson() => {
-        'type': type.name,
-        'description': description,
-        'createdAt': createdAt.toIso8601String(),
-      };
-}
-
-String formatDateTime(DateTime value) {
-  final mm = value.month.toString().padLeft(2, '0');
-  final dd = value.day.toString().padLeft(2, '0');
-  final hh = value.hour.toString().padLeft(2, '0');
-  final minValue = value.minute.toString().padLeft(2, '0');
-  return '${value.year}.$mm.$dd $hh:$minValue';
-}
-
-String formatAmount(double value) {
-  final rounded = value.round();
-  final chars = rounded.toString().split('').reversed.toList();
-  final buffer = StringBuffer();
-  for (var i = 0; i < chars.length; i++) {
-    if (i != 0 && i % 3 == 0) {
-      buffer.write(',');
-    }
-    buffer.write(chars[i]);
-  }
-  return '${buffer.toString().split('').reversed.join()}원';
-}
-
-LossEstimate estimateLoss(EvidenceRecord record) {
-  final amount = record.amount ?? 0;
-  final days = max(0, DateTime.now().difference(record.eventAt).inDays);
-  final loss = amount * record.dailyLossRate * days;
-  return LossEstimate(days: days, amount: loss, message: '지금까지 ${days}일 지연 → 손해 ${formatAmount(loss)} 추정');
-}
-
-class LossEstimate {
-  const LossEstimate({required this.days, required this.amount, required this.message});
-
-  final int days;
-  final double amount;
-  final String message;
-}
-
-Future<void> showAppToast(String message) async {
-  await Fluttertoast.cancel();
-  await Fluttertoast.showToast(
-    msg: message,
-    toastLength: Toast.LENGTH_SHORT,
-    gravity: ToastGravity.BOTTOM,
-    backgroundColor: const Color(0xFF17203A),
-    textColor: Colors.white,
-    fontSize: 14,
-  );
-}
-
-String _defaultDeviceSummary() {
-  if (kIsWeb) return 'Web';
-  if (Platform.isIOS) return 'iPhone / iOS';
-  if (Platform.isAndroid) return 'Android phone';
-  return 'Unknown device';
-}
-
-Widget _pill(String label, Color bg, Color fg) {
-  return Container(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-    decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(999)),
-    child: Text(label, style: TextStyle(color: fg, fontWeight: FontWeight.w700)),
-  );
 }
