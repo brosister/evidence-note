@@ -65,15 +65,109 @@ class EvidenceNoteApp extends StatelessWidget {
         fontFamily: 'Pretendard',
         scaffoldBackgroundColor: const Color(0xFFF4F7FF),
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF4E6BFF)),
+        textTheme: const TextTheme(
+          headlineLarge: TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w700, height: 1.22, letterSpacing: -0.4),
+          headlineMedium: TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w700, height: 1.24, letterSpacing: -0.3),
+          headlineSmall: TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w700, height: 1.26, letterSpacing: -0.2),
+          titleLarge: TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w600, height: 1.3, letterSpacing: -0.2),
+          titleMedium: TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w600, height: 1.32, letterSpacing: -0.1),
+          titleSmall: TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w600, height: 1.34),
+          bodyLarge: TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w400, height: 1.5),
+          bodyMedium: TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w400, height: 1.48),
+          bodySmall: TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w400, height: 1.42),
+          labelLarge: TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w600, height: 1.18),
+          labelMedium: TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w500, height: 1.16),
+          labelSmall: TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w500, height: 1.14),
+        ),
         appBarTheme: const AppBarTheme(
           backgroundColor: Color(0xFFF4F7FF),
           surfaceTintColor: Colors.transparent,
           elevation: 0,
           scrolledUnderElevation: 0,
+          titleTextStyle: TextStyle(
+            fontFamily: 'Pretendard',
+            fontSize: 20,
+            fontWeight: FontWeight.w700,
+            height: 1.2,
+            color: Color(0xFF17203A),
+          ),
+          toolbarTextStyle: TextStyle(
+            fontFamily: 'Pretendard',
+            fontSize: 15,
+            fontWeight: FontWeight.w500,
+            color: Color(0xFF17203A),
+          ),
           systemOverlayStyle: SystemUiOverlayStyle(
             statusBarColor: Colors.transparent,
             statusBarIconBrightness: Brightness.dark,
             statusBarBrightness: Brightness.dark,
+          ),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFFF7F9FF),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          labelStyle: const TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w500, color: Color(0xFF66718F)),
+          hintStyle: const TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w400, color: Color(0xFF98A2B3)),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(18),
+            borderSide: BorderSide.none,
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(18),
+            borderSide: BorderSide.none,
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(18),
+            borderSide: const BorderSide(color: Color(0xFF4E6BFF), width: 1.4),
+          ),
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            textStyle: const TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w600, fontSize: 15),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            textStyle: const TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w600, fontSize: 15),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          ),
+        ),
+        textButtonTheme: TextButtonThemeData(
+          style: TextButton.styleFrom(
+            textStyle: const TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w600, fontSize: 15),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          ),
+        ),
+        segmentedButtonTheme: SegmentedButtonThemeData(
+          style: ButtonStyle(
+            textStyle: const WidgetStatePropertyAll(
+              TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w600, fontSize: 14),
+            ),
+          ),
+        ),
+        chipTheme: ChipThemeData(
+          backgroundColor: Colors.white,
+          selectedColor: const Color(0xFF4E6BFF),
+          disabledColor: const Color(0xFFE5EAF7),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          labelStyle: const TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w600, color: Color(0xFF44506C)),
+          secondaryLabelStyle: const TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w600, color: Colors.white),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999), side: BorderSide.none),
+        ),
+        dialogTheme: DialogThemeData(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+          titleTextStyle: const TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w700, fontSize: 20, color: Color(0xFF17203A)),
+          contentTextStyle: const TextStyle(fontFamily: 'Pretendard', fontWeight: FontWeight.w400, fontSize: 14, height: 1.5, color: Color(0xFF44506C)),
+        ),
+        bottomSheetTheme: const BottomSheetThemeData(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
           ),
         ),
         cardTheme: CardTheme(
