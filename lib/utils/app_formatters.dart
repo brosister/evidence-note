@@ -7,6 +7,12 @@ import 'package:fluttertoast/fluttertoast.dart';
 
 import '../models/evidence_models.dart';
 
+bool useKorean(BuildContext context) => Localizations.localeOf(context).languageCode == 'ko';
+
+String tr(BuildContext context, {required String ko, required String en}) {
+  return useKorean(context) ? ko : en;
+}
+
 String formatDateTime(DateTime value) {
   final mm = value.month.toString().padLeft(2, '0');
   final dd = value.day.toString().padLeft(2, '0');

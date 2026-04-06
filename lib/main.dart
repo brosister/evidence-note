@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:crypto/crypto.dart';
+import 'package:cross_file/cross_file.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -18,17 +19,217 @@ import 'package:printing/printing.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:record/record.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:signature/signature.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:uuid/uuid.dart';
 
 import 'models/evidence_models.dart';
 import 'photo_picker_page.dart';
+import 'services/evidence_api_service.dart';
+import 'services/evidence_backend_service.dart';
 import 'services/evidence_repository.dart';
 import 'services/reminder_service.dart';
 import 'utils/app_formatters.dart';
 
 const _uuid = Uuid();
+Future<pw.Font>? _pdfRegularFontLoader;
+Future<pw.Font>? _pdfBoldFontLoader;
+
+Future<pw.Font> _loadPdfRegularFont() {
+  return _pdfRegularFontLoader ??= rootBundle.load('assets/fonts/Pretendard-Regular.otf').then(
+        (data) => pw.Font.ttf(data),
+      );
+}
+
+Future<pw.Font> _loadPdfBoldFont() {
+  return _pdfBoldFontLoader ??= rootBundle.load('assets/fonts/Pretendard-Bold.otf').then(
+        (data) => pw.Font.ttf(data),
+      );
+}
+
+String _pdfSafeName(String source) {
+  final normalized = source.trim().replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').replaceAll(RegExp(r'\s+'), '_');
+  return normalized.isEmpty ? 'evidence_note' : normalized;
+}
+
+String _attachmentUploadKey(AttachmentType type) => '${type.name}_${const Uuid().v4()}';
+
+Future<Map<String, dynamic>?> _fetchEvidenceNoteAdSettings() async {
+  final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+  try {
+    final request = await client.getUrl(Uri.https('app-master.officialsite.kr', '/api/evidence-note/ad-settings'));
+    final response = await request.close();
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return null;
+    }
+    final body = await response.transform(utf8.decoder).join();
+    final decoded = jsonDecode(body) as Map<String, dynamic>;
+    final data = decoded['data'];
+    return data is Map<String, dynamic> ? data : null;
+  } catch (_) {
+    return null;
+  } finally {
+    client.close(force: true);
+  }
+}
+
+class EvidenceInterstitialAdService {
+  EvidenceInterstitialAdService._();
+
+  static final EvidenceInterstitialAdService instance = EvidenceInterstitialAdService._();
+  static const _saveCounterKey = 'evidence_note_interstitial_save_counter';
+  static const _lastShownAtKey = 'evidence_note_interstitial_last_shown_at';
+
+  InterstitialAd? _interstitialAd;
+  bool _loading = false;
+
+  String get _fallbackUnitId {
+    if (Platform.isAndroid) return 'ca-app-pub-3940256099942544/1033173712';
+    if (Platform.isIOS) return 'ca-app-pub-3940256099942544/4411468910';
+    return '';
+  }
+
+  Future<String> _resolveUnitId() async {
+    if (!Platform.isAndroid && !Platform.isIOS) return '';
+    final data = await _fetchEvidenceNoteAdSettings();
+    if (data == null) return _fallbackUnitId;
+    if (Platform.isAndroid) {
+      return (data['android_interstitial_ad_id'] as String?)?.trim().isNotEmpty == true
+          ? data['android_interstitial_ad_id'] as String
+          : _fallbackUnitId;
+    }
+    return (data['ios_interstitial_ad_id'] as String?)?.trim().isNotEmpty == true
+        ? data['ios_interstitial_ad_id'] as String
+        : _fallbackUnitId;
+  }
+
+  Future<void> preload() async {
+    if (_loading || _interstitialAd != null) return;
+    final unitId = await _resolveUnitId();
+    if (unitId.isEmpty) return;
+    _loading = true;
+    InterstitialAd.load(
+      adUnitId: unitId,
+      request: const AdRequest(),
+      adLoadCallback: InterstitialAdLoadCallback(
+        onAdLoaded: (ad) {
+          _interstitialAd = ad;
+          _loading = false;
+        },
+        onAdFailedToLoad: (_) {
+          _interstitialAd = null;
+          _loading = false;
+        },
+      ),
+    );
+  }
+
+  Future<void> onRecordSaved() async {
+    final prefs = await SharedPreferences.getInstance();
+    final currentCount = prefs.getInt(_saveCounterKey) ?? 0;
+    final nextCount = currentCount + 1;
+    await prefs.setInt(_saveCounterKey, nextCount);
+
+    final lastShownRaw = prefs.getString(_lastShownAtKey);
+    final lastShownAt = lastShownRaw == null ? null : DateTime.tryParse(lastShownRaw);
+    final withinCooldown = lastShownAt != null && DateTime.now().difference(lastShownAt) < const Duration(seconds: 90);
+
+    if (nextCount < 2 || withinCooldown) {
+      await preload();
+      return;
+    }
+
+    if (_interstitialAd == null) {
+      await preload();
+      return;
+    }
+
+    final ad = _interstitialAd!;
+    _interstitialAd = null;
+    final completer = Completer<void>();
+    ad.fullScreenContentCallback = FullScreenContentCallback(
+      onAdDismissedFullScreenContent: (ad) async {
+        ad.dispose();
+        await prefs.setInt(_saveCounterKey, 0);
+        await prefs.setString(_lastShownAtKey, DateTime.now().toIso8601String());
+        await preload();
+        if (!completer.isCompleted) completer.complete();
+      },
+      onAdFailedToShowFullScreenContent: (ad, _) async {
+        ad.dispose();
+        await preload();
+        if (!completer.isCompleted) completer.complete();
+      },
+    );
+    ad.show();
+    await completer.future;
+  }
+}
+
+String? _photoAssetIdFromAttachment(AttachmentItem item) {
+  if ((item.localAssetId ?? '').isNotEmpty) {
+    return item.localAssetId;
+  }
+  final fileName = item.path.split(Platform.pathSeparator).last;
+  final match = RegExp(r'^photo_\d+_(.+)\.[^.]+$').firstMatch(fileName);
+  return match?.group(1);
+}
+
+Future<Uint8List> _buildRecordPdfBytes(EvidenceRecord record, String languageCode) async {
+  final isKo = languageCode == 'ko';
+  final pdf = pw.Document();
+  final regularFont = await _loadPdfRegularFont();
+  final boldFont = await _loadPdfBoldFont();
+  final photoCount = record.attachments.where((item) => item.type == AttachmentType.photo).length;
+  final audioCount = record.attachments.where((item) => item.type == AttachmentType.audio).length;
+  final signatureCount = record.attachments.where((item) => item.type == AttachmentType.signature).length;
+
+  pdf.addPage(
+    pw.MultiPage(
+      theme: pw.ThemeData.withFont(
+        base: regularFont,
+        bold: boldFont,
+      ),
+      build: (_) => [
+        pw.Text(isKo ? '증거노트 요약' : 'Evidence Note Summary', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 16),
+        pw.Text('${isKo ? '제목' : 'Title'}: ${record.title}'),
+        pw.Text('${isKo ? '상대' : 'Counterparty'}: ${record.counterpartyName.isEmpty ? '-' : record.counterpartyName}'),
+        pw.Text('${isKo ? '금액' : 'Amount'}: ${record.amount == null ? '-' : formatAmount(record.amount!)}'),
+        pw.Text('${isKo ? '기록 시각' : 'Recorded At'}: ${formatDateTime(record.eventAt)}'),
+        pw.Text('${isKo ? '만기' : 'Due'}: ${record.dueAt == null ? '-' : formatDateTime(record.dueAt!)}'),
+        pw.Text('${isKo ? '알림' : 'Reminder'}: ${record.reminderAt == null ? '-' : formatDateTime(record.reminderAt!)}'),
+        pw.Text('${isKo ? '상태' : 'Status'}: ${record.status.localizedLabel(languageCode)}'),
+        pw.Text('${isKo ? '고유 ID' : 'Proof ID'}: ${record.proofId}'),
+        pw.Text('${isKo ? '해시' : 'Hash'}: ${record.proofHash}'),
+        pw.Text('${isKo ? '기기 정보' : 'Device'}: ${record.deviceSummary.isEmpty ? '-' : record.deviceSummary}'),
+        pw.SizedBox(height: 16),
+        pw.Text(isKo ? '메모' : 'Memo', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 6),
+        pw.Text(record.memo.trim().isEmpty ? '-' : record.memo.trim()),
+        pw.SizedBox(height: 16),
+        pw.Text(isKo ? '첨부 요약' : 'Attachment Summary', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+        pw.Bullet(text: '${isKo ? '사진' : 'Photos'} $photoCount${isKo ? '건' : ''}'),
+        pw.Bullet(text: '${isKo ? '음성' : 'Audio'} $audioCount${isKo ? '건' : ''}'),
+        pw.Bullet(text: '${isKo ? '서명' : 'Signatures'} $signatureCount${isKo ? '건' : ''}'),
+      ],
+    ),
+  );
+  return pdf.save();
+}
+
+Future<File> _writeRecordPdfFile(EvidenceRecord record, String languageCode) async {
+  final bytes = await _buildRecordPdfBytes(record, languageCode);
+  final dir = await getTemporaryDirectory();
+  final exportDir = Directory('${dir.path}/evidence_note_exports');
+  if (!await exportDir.exists()) {
+    await exportDir.create(recursive: true);
+  }
+  final file = File('${exportDir.path}/${_pdfSafeName(record.title)}_${record.id}.pdf');
+  await file.writeAsBytes(bytes, flush: true);
+  return file;
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -42,6 +243,7 @@ Future<void> main() async {
 
   final repository = EvidenceRepository();
   await repository.init();
+  await EvidenceApiService.instance.init();
   await ReminderService.instance.init();
   await MobileAds.instance.initialize();
 
@@ -58,11 +260,15 @@ class EvidenceNoteApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Evidence Note',
+      localeResolutionCallback: (locale, supportedLocales) {
+        if (locale?.languageCode == 'ko') {
+          return const Locale('ko');
+        }
+        return const Locale('en');
+      },
       supportedLocales: const [
-        Locale('en'),
         Locale('ko'),
-        Locale('ja'),
-        Locale('zh', 'Hans'),
+        Locale('en'),
       ],
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
       theme: ThemeData(
@@ -211,17 +417,28 @@ class _EvidenceHomePageState extends State<EvidenceHomePage> {
   PromiseStatus? _statusFilter;
   String _searchQuery = '';
   int _selectedPage = 0;
+  int _editorReturnPage = 0;
+  EvidenceRecord? _editingRecord;
+  bool _embeddedEditorSaving = false;
+  GlobalKey<_EvidenceEditorPageState> _embeddedEditorKey = GlobalKey<_EvidenceEditorPageState>();
 
   @override
   void initState() {
     super.initState();
     _load();
+    unawaited(EvidenceInterstitialAdService.instance.preload());
   }
 
   Future<void> _load() async {
-    final records = await widget.repository.loadRecords();
-    if (!mounted) return;
-    setState(() => _records = records);
+    try {
+      final records = await widget.repository.loadRecords();
+      if (!mounted) return;
+      setState(() => _records = records);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _records = const []);
+      await showAppToast('데이터를 불러오지 못했습니다. 인터넷 연결을 확인해 주세요.');
+    }
   }
 
   List<EvidenceRecord> get _filteredRecords {
@@ -241,21 +458,21 @@ class _EvidenceHomePageState extends State<EvidenceHomePage> {
     ..sort((a, b) => b.eventAt.compareTo(a.eventAt));
 
   Future<void> _openEditor({EvidenceRecord? existing}) async {
-    final changed = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(
-        builder: (_) => EvidenceEditorPage(
-          repository: widget.repository,
-          existing: existing,
-        ),
-      ),
-    );
-    if (changed == true) {
-      await _load();
-    }
+    setState(() {
+      _editorReturnPage = _selectedPage == 4 ? 0 : _selectedPage;
+      _editingRecord = existing;
+      _embeddedEditorKey = GlobalKey<_EvidenceEditorPageState>();
+      _selectedPage = 4;
+    });
   }
 
   Future<void> _openComposerInPlace() async {
-    setState(() => _selectedPage = 4);
+    setState(() {
+      _editorReturnPage = _selectedPage == 4 ? 0 : _selectedPage;
+      _editingRecord = null;
+      _embeddedEditorKey = GlobalKey<_EvidenceEditorPageState>();
+      _selectedPage = 4;
+    });
   }
 
   Future<void> _deleteRecord(EvidenceRecord record) async {
@@ -284,6 +501,42 @@ class _EvidenceHomePageState extends State<EvidenceHomePage> {
     await showAppToast('기록을 삭제했습니다.');
   }
 
+  Future<void> _exportRecordPdf(EvidenceRecord record) async {
+    final languageCode = Localizations.localeOf(context).languageCode;
+    final bytes = await _buildRecordPdfBytes(record, languageCode);
+    await Printing.layoutPdf(onLayout: (_) async => bytes);
+    unawaited(
+      EvidenceBackendService.logPdfAction(
+        record: record,
+        action: 'export',
+        fileName: '${_pdfSafeName(record.title)}_${record.id}.pdf',
+        fileSizeBytes: bytes.length,
+        locale: languageCode,
+      ),
+    );
+  }
+
+  Future<void> _shareRecordPdf(EvidenceRecord record) async {
+    final languageCode = Localizations.localeOf(context).languageCode;
+    final file = await _writeRecordPdfFile(record, languageCode);
+    await SharePlus.instance.share(
+      ShareParams(
+        text: record.title,
+        files: [XFile(file.path)],
+      ),
+    );
+    final fileSize = await file.length();
+    unawaited(
+      EvidenceBackendService.logPdfAction(
+        record: record,
+        action: 'share',
+        fileName: file.path.split(Platform.pathSeparator).last,
+        fileSizeBytes: fileSize,
+        locale: languageCode,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final filteredRecords = _filteredRecords;
@@ -291,13 +544,14 @@ class _EvidenceHomePageState extends State<EvidenceHomePage> {
     final unresolvedAmount = _records
         .where((record) => record.status != PromiseStatus.completed)
         .fold<double>(0, (sum, item) => sum + (item.amount ?? 0));
+    final inProgressCount = _records.where((record) => record.status == PromiseStatus.inProgress).length;
     final unresolvedCount = _records.where((record) => record.status == PromiseStatus.unresolved).length;
     final completedCount = _records.where((record) => record.status == PromiseStatus.completed).length;
-    final bottomInset = MediaQuery.of(context).viewPadding.bottom;
     final pages = [
       _OverviewPage(
         records: sortedRecords,
         unresolvedAmount: unresolvedAmount,
+        inProgressCount: inProgressCount,
         unresolvedCount: unresolvedCount,
         completedCount: completedCount,
         onOpen: _openEditor,
@@ -307,11 +561,15 @@ class _EvidenceHomePageState extends State<EvidenceHomePage> {
         statusFilter: _statusFilter,
         searchQuery: _searchQuery,
         unresolvedAmount: unresolvedAmount,
+        inProgressCount: inProgressCount,
         unresolvedCount: unresolvedCount,
+        completedCount: completedCount,
         onSearchChanged: (value) => setState(() => _searchQuery = value),
         onFilterChanged: (status) => setState(() => _statusFilter = status),
         onOpen: _openEditor,
         onDelete: _deleteRecord,
+        onExportPdf: _exportRecordPdf,
+        onSharePdf: _shareRecordPdf,
       ),
       _CalendarPage(
         records: sortedRecords,
@@ -322,16 +580,31 @@ class _EvidenceHomePageState extends State<EvidenceHomePage> {
         onOpen: _openEditor,
       ),
       EvidenceEditorPage(
+        key: _embeddedEditorKey,
         repository: widget.repository,
+        existing: _editingRecord,
         embedded: true,
         onSaved: () async {
           await _load();
           if (!mounted) return;
-          setState(() => _selectedPage = 1);
+          setState(() {
+            final targetPage = _editingRecord == null ? 1 : _editorReturnPage;
+            _editingRecord = null;
+            _embeddedEditorSaving = false;
+            _selectedPage = targetPage;
+          });
         },
         onCancel: () {
           if (!mounted) return;
-          setState(() => _selectedPage = 0);
+          setState(() {
+            _editingRecord = null;
+            _embeddedEditorSaving = false;
+            _selectedPage = _editorReturnPage;
+          });
+        },
+        onSavingChanged: (saving) {
+          if (!mounted) return;
+          setState(() => _embeddedEditorSaving = saving);
         },
       ),
     ];
@@ -347,11 +620,50 @@ class _EvidenceHomePageState extends State<EvidenceHomePage> {
         titleSpacing: 20,
         leading: _selectedPage == 4
             ? IconButton(
-                onPressed: () => setState(() => _selectedPage = 0),
+                onPressed: () => setState(() {
+                  _editingRecord = null;
+                  _selectedPage = _editorReturnPage;
+                }),
                 icon: const Icon(Icons.close_rounded),
               )
             : null,
         title: _HomeAppBarTitle(selectedPage: _selectedPage),
+        actions: _selectedPage == 4
+            ? [
+                Padding(
+                  padding: const EdgeInsets.only(right: 12),
+                  child: FilledButton(
+                    onPressed: _embeddedEditorSaving ? null : () => _embeddedEditorKey.currentState?.triggerSave(),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _embeddedEditorSaving ? const Color(0xFFBCC5D1) : const Color(0xFF183B56),
+                      disabledBackgroundColor: const Color(0xFFBCC5D1),
+                      foregroundColor: Colors.white,
+                      disabledForegroundColor: Colors.white,
+                      minimumSize: const Size(0, 42),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_embeddedEditorSaving) ...[
+                          const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.2,
+                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        Text(_embeddedEditorSaving ? tr(context, ko: '저장 중', en: 'Saving') : tr(context, ko: '저장', en: 'Save')),
+                      ],
+                    ),
+                  ),
+                ),
+              ]
+            : null,
       ),
       body: Stack(
         children: [
@@ -371,19 +683,19 @@ class _EvidenceHomePageState extends State<EvidenceHomePage> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const _AdMobBannerBar(),
                   _EvidenceBottomNav(
                     selectedIndex: _selectedPage,
-                    extraBottomPadding: bottomInset,
                     onAdd: _openComposerInPlace,
                     onSelected: (index) => setState(() => _selectedPage = index),
                     items: const [
-                      _EvidenceNavItemData(label: '홈', icon: Icons.home_rounded, color: Color(0xFF183B56)),
-                      _EvidenceNavItemData(label: '기록', icon: Icons.sticky_note_2_rounded, color: Color(0xFF183B56)),
-                      _EvidenceNavItemData(label: '달력', icon: Icons.calendar_month_rounded, color: Color(0xFF183B56)),
-                      _EvidenceNavItemData(label: '타임라인', icon: Icons.timeline_rounded, color: Color(0xFF183B56)),
+                      _EvidenceNavItemData(label: 'home', icon: Icons.home_rounded, color: Color(0xFF183B56)),
+                      _EvidenceNavItemData(label: 'records', icon: Icons.sticky_note_2_rounded, color: Color(0xFF183B56)),
+                      _EvidenceNavItemData(label: 'calendar', icon: Icons.calendar_month_rounded, color: Color(0xFF183B56)),
+                      _EvidenceNavItemData(label: 'timeline', icon: Icons.timeline_rounded, color: Color(0xFF183B56)),
                     ],
                   ),
+                  const SizedBox(height: 10),
+                  const _AdMobBannerBar(),
                 ],
               ),
             ),
@@ -469,13 +781,29 @@ class _HomeAppBarTitle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (title, subtitle) = switch (selectedPage) {
-      0 => ('증거노트', '약속과 거래 기록을 더 정돈된 증거 흐름으로 관리'),
-      1 => ('기록 관리', '저장된 약속과 거래를 빠르게 탐색'),
-      2 => ('달력 보기', '기록일과 만기 일정을 달력에서 함께 확인'),
-      3 => ('타임라인', '생성부터 첨부까지 흐름을 한눈에 확인'),
-      _ => ('새 기록 만들기', '하단 네비는 유지한 채 기록 작성 화면으로 전환됩니다.'),
+      0 => (
+          tr(context, ko: '증거노트', en: 'Evidence Note'),
+          tr(context, ko: '약속과 거래 기록을 더 정돈된 증거 흐름으로 관리', en: 'Keep promises and transactions in a more structured evidence flow'),
+        ),
+      1 => (
+          tr(context, ko: '기록 관리', en: 'Records'),
+          tr(context, ko: '저장된 약속과 거래를 빠르게 탐색', en: 'Browse saved promises and transactions quickly'),
+        ),
+      2 => (
+          tr(context, ko: '달력 보기', en: 'Calendar'),
+          tr(context, ko: '기록일과 만기 일정을 달력에서 함께 확인', en: 'See record dates and due dates together on the calendar'),
+        ),
+      3 => (
+          tr(context, ko: '타임라인', en: 'Timeline'),
+          tr(context, ko: '생성부터 첨부까지 흐름을 한눈에 확인', en: 'Track the flow from creation to attachments at a glance'),
+        ),
+      _ => (
+          tr(context, ko: '새 기록 만들기', en: 'New Record'),
+          tr(context, ko: '하단 네비는 유지한 채 기록 작성 화면으로 전환됩니다.', en: 'Create a record while keeping the bottom navigation fixed'),
+        ),
     };
     final isHomePage = selectedPage == 0;
+    final showSubtitle = selectedPage != 4;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -491,19 +819,21 @@ class _HomeAppBarTitle extends StatelessWidget {
             letterSpacing: isHomePage ? -0.8 : -0.5,
           ),
         ),
-        const SizedBox(height: 4),
-        Text(
-          subtitle,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            fontFamily: 'Pretendard',
-            fontSize: isHomePage ? 13.5 : 13,
-            fontWeight: FontWeight.w500,
-            color: const Color(0xFF66718F),
-            height: 1.28,
+        if (showSubtitle) ...[
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontFamily: 'Pretendard',
+              fontSize: isHomePage ? 13.5 : 13,
+              fontWeight: FontWeight.w500,
+              color: const Color(0xFF66718F),
+              height: 1.28,
+            ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -513,6 +843,7 @@ class _OverviewPage extends StatelessWidget {
   const _OverviewPage({
     required this.records,
     required this.unresolvedAmount,
+    required this.inProgressCount,
     required this.unresolvedCount,
     required this.completedCount,
     required this.onOpen,
@@ -520,6 +851,7 @@ class _OverviewPage extends StatelessWidget {
 
   final List<EvidenceRecord> records;
   final double unresolvedAmount;
+  final int inProgressCount;
   final int unresolvedCount;
   final int completedCount;
   final Future<void> Function({EvidenceRecord? existing}) onOpen;
@@ -532,10 +864,11 @@ class _OverviewPage extends StatelessWidget {
           orElse: () => records.isNotEmpty ? records.first : null,
         );
     return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 8, 20, 140),
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 170),
       children: [
         _HeroHeaderCard(
           unresolvedAmount: unresolvedAmount,
+          inProgressCount: inProgressCount,
           unresolvedCount: unresolvedCount,
           completedCount: completedCount,
         ),
@@ -585,49 +918,83 @@ class _RecordsPage extends StatelessWidget {
     required this.statusFilter,
     required this.searchQuery,
     required this.unresolvedAmount,
+    required this.inProgressCount,
     required this.unresolvedCount,
+    required this.completedCount,
     required this.onSearchChanged,
     required this.onFilterChanged,
     required this.onOpen,
     required this.onDelete,
+    required this.onExportPdf,
+    required this.onSharePdf,
   });
 
   final List<EvidenceRecord> records;
   final PromiseStatus? statusFilter;
   final String searchQuery;
   final double unresolvedAmount;
+  final int inProgressCount;
   final int unresolvedCount;
+  final int completedCount;
   final ValueChanged<String> onSearchChanged;
   final ValueChanged<PromiseStatus?> onFilterChanged;
   final Future<void> Function({EvidenceRecord? existing}) onOpen;
   final Future<void> Function(EvidenceRecord record) onDelete;
+  final Future<void> Function(EvidenceRecord record) onExportPdf;
+  final Future<void> Function(EvidenceRecord record) onSharePdf;
 
   @override
   Widget build(BuildContext context) {
+    final languageCode = Localizations.localeOf(context).languageCode;
+    if (records.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 170),
+        child: _EmptyState(
+          title: tr(context, ko: '아직 기록이 없습니다', en: 'No records yet'),
+          body: tr(context, ko: '새 기록을 만들면 거래/약속/증거가 타임라인으로 정리됩니다.', en: 'Create your first record to organize promises, transactions, and evidence in a timeline.'),
+        ),
+      );
+    }
+
     return Column(
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Row(
                 children: [
                   Expanded(
                     child: _CompactMetricChip(
-                      label: '미회수',
-                      value: formatAmount(unresolvedAmount),
+                      label: tr(context, ko: '진행중', en: 'In Progress'),
+                      value: languageCode == 'ko' ? '$inProgressCount건' : '$inProgressCount items',
                       accent: const Color(0xFF3457F1),
                     ),
                   ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: _CompactMetricChip(
-                      label: '미해결',
-                      value: '$unresolvedCount건',
+                      label: tr(context, ko: '미해결', en: 'Unresolved'),
+                      value: languageCode == 'ko' ? '$unresolvedCount건' : '$unresolvedCount items',
                       accent: const Color(0xFFD97706),
                     ),
                   ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _CompactMetricChip(
+                      label: tr(context, ko: '완료', en: 'Completed'),
+                      value: languageCode == 'ko' ? '$completedCount건' : '$completedCount items',
+                      accent: const Color(0xFF16865A),
+                    ),
+                  ),
                 ],
+              ),
+              const SizedBox(height: 10),
+              _CompactMetricChip(
+                label: tr(context, ko: '미회수 금액', en: 'Outstanding Amount'),
+                value: formatAmount(unresolvedAmount),
+                accent: const Color(0xFF48617D),
               ),
               const SizedBox(height: 14),
               _GlassSearchField(
@@ -640,7 +1007,7 @@ class _RecordsPage extends StatelessWidget {
                 child: Row(
                   children: [
                     _ModernFilterChip(
-                      label: '전체',
+                      label: tr(context, ko: '전체', en: 'All'),
                       selected: statusFilter == null,
                       onTap: () => onFilterChanged(null),
                     ),
@@ -649,7 +1016,7 @@ class _RecordsPage extends StatelessWidget {
                       (status) => Padding(
                         padding: const EdgeInsets.only(right: 8),
                         child: _ModernFilterChip(
-                          label: status.label,
+                          label: status.localizedLabel(languageCode),
                           selected: statusFilter == status,
                           onTap: () => onFilterChanged(status),
                         ),
@@ -662,7 +1029,13 @@ class _RecordsPage extends StatelessWidget {
           ),
         ),
         Expanded(
-          child: _PromiseListTab(records: records, onOpen: onOpen, onDelete: onDelete),
+          child: _PromiseListTab(
+            records: records,
+            onOpen: onOpen,
+            onDelete: onDelete,
+            onExportPdf: onExportPdf,
+            onSharePdf: onSharePdf,
+          ),
         ),
       ],
     );
@@ -680,7 +1053,18 @@ class _ActivityPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final languageCode = Localizations.localeOf(context).languageCode;
     final totalEvents = records.fold<int>(0, (sum, record) => sum + record.timeline.length);
+    if (totalEvents == 0) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 170),
+        child: _EmptyState(
+          title: tr(context, ko: '타임라인이 비어 있습니다', en: 'Timeline is empty'),
+          body: tr(context, ko: '기록을 저장하면 생성·수정·증거 첨부 이력이 직설적으로 쌓입니다.', en: 'Once you save records, creation, edits, and attachments will build up here.'),
+        ),
+      );
+    }
+
     return Column(
       children: [
         Padding(
@@ -691,16 +1075,16 @@ class _ActivityPage extends StatelessWidget {
                 children: [
                   Expanded(
                     child: _CompactMetricChip(
-                      label: '전체 이벤트',
-                      value: '$totalEvents건',
+                      label: tr(context, ko: '전체 이벤트', en: 'Events'),
+                      value: languageCode == 'ko' ? '$totalEvents건' : '$totalEvents items',
                       accent: const Color(0xFF0F766E),
                     ),
                   ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: _CompactMetricChip(
-                      label: '기록 수',
-                      value: '${records.length}건',
+                      label: tr(context, ko: '기록 수', en: 'Records'),
+                      value: languageCode == 'ko' ? '${records.length}건' : '${records.length} items',
                       accent: const Color(0xFF3457F1),
                     ),
                   ),
@@ -747,6 +1131,7 @@ class _CalendarPageState extends State<_CalendarPage> {
 
   @override
   Widget build(BuildContext context) {
+    final languageCode = Localizations.localeOf(context).languageCode;
     final selectedDay = _selectedDay ?? _focusedDay;
     final selectedRecords = _eventsForDay(selectedDay);
     final upcomingDue = widget.records
@@ -757,29 +1142,35 @@ class _CalendarPageState extends State<_CalendarPage> {
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
-          child: Column(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 10),
+          child: Row(
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: _CompactMetricChip(
-                      label: '이번 달 기록',
-                      value: '${widget.records.where((record) => record.eventAt.year == _focusedDay.year && record.eventAt.month == _focusedDay.month).length}건',
-                      accent: const Color(0xFF3457F1),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: _CompactMetricChip(
-                      label: '예정 만기',
-                      value: '${upcomingDue.where((record) => record.dueAt!.isAfter(DateTime.now().subtract(const Duration(days: 1)))).length}건',
-                      accent: const Color(0xFF7C3AED),
-                    ),
-                  ),
-                ],
+              Expanded(
+                child: _CompactMetricChip(
+                  label: tr(context, ko: '이번 달 기록', en: 'This Month'),
+                  value: languageCode == 'ko'
+                      ? '${widget.records.where((record) => record.eventAt.year == _focusedDay.year && record.eventAt.month == _focusedDay.month).length}건'
+                      : '${widget.records.where((record) => record.eventAt.year == _focusedDay.year && record.eventAt.month == _focusedDay.month).length} items',
+                  accent: const Color(0xFF3457F1),
+                ),
               ),
-              const SizedBox(height: 14),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _CompactMetricChip(
+                  label: tr(context, ko: '예정 만기', en: 'Upcoming Due'),
+                  value: languageCode == 'ko'
+                      ? '${upcomingDue.where((record) => record.dueAt!.isAfter(DateTime.now().subtract(const Duration(days: 1)))).length}건'
+                      : '${upcomingDue.where((record) => record.dueAt!.isAfter(DateTime.now().subtract(const Duration(days: 1)))).length} items',
+                  accent: const Color(0xFF7C3AED),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 170),
+            children: [
               ClipRRect(
                 borderRadius: BorderRadius.circular(28),
                 child: BackdropFilter(
@@ -792,6 +1183,7 @@ class _CalendarPageState extends State<_CalendarPage> {
                       border: Border.all(color: Colors.white.withValues(alpha: 0.92)),
                     ),
                     child: TableCalendar<EvidenceRecord>(
+                      locale: useKorean(context) ? 'ko_KR' : 'en_US',
                       firstDay: DateTime.utc(2020, 1, 1),
                       lastDay: DateTime.utc(2100, 12, 31),
                       focusedDay: _focusedDay,
@@ -800,7 +1192,7 @@ class _CalendarPageState extends State<_CalendarPage> {
                       calendarFormat: CalendarFormat.month,
                       startingDayOfWeek: StartingDayOfWeek.monday,
                       headerStyle: const HeaderStyle(
-                        titleCentered: false,
+                        titleCentered: true,
                         formatButtonVisible: false,
                         titleTextStyle: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: Color(0xFF17203A)),
                       ),
@@ -813,6 +1205,10 @@ class _CalendarPageState extends State<_CalendarPage> {
                         selectedDecoration: BoxDecoration(
                           color: const Color(0xFF183B56),
                           borderRadius: BorderRadius.circular(16),
+                        ),
+                        selectedTextStyle: const TextStyle(
+                          color: Color(0xFF17203A),
+                          fontWeight: FontWeight.w700,
                         ),
                         markerDecoration: const BoxDecoration(
                           color: Color(0xFF7C3AED),
@@ -834,19 +1230,13 @@ class _CalendarPageState extends State<_CalendarPage> {
                   ),
                 ),
               ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(20, 4, 20, 120),
-            children: [
+              const SizedBox(height: 14),
               _SectionShell(
-                title: '선택한 날짜',
-                subtitle: '${formatDate(selectedDay)} 기준 기록일과 만기 일정이 함께 표시됩니다.',
+                title: tr(context, ko: '선택한 날짜', en: 'Selected Date'),
+                subtitle: tr(context, ko: '${formatDate(selectedDay)} 기준 기록일과 만기 일정이 함께 표시됩니다.', en: 'Record dates and due dates for ${formatDate(selectedDay)} are shown together.'),
                 child: selectedRecords.isEmpty
-                    ? const Text(
-                        '선택한 날짜에 연결된 기록이 없습니다.',
+                    ? Text(
+                        tr(context, ko: '선택한 날짜에 연결된 기록이 없습니다.', en: 'There are no records linked to the selected date.'),
                         style: TextStyle(color: Color(0xFF66718F), height: 1.45),
                       )
                     : Column(
@@ -863,11 +1253,11 @@ class _CalendarPageState extends State<_CalendarPage> {
               ),
               const SizedBox(height: 14),
               _SectionShell(
-                title: '다가오는 만기',
-                subtitle: '완료되지 않은 기록 중 기한이 가까운 항목을 우선적으로 확인합니다.',
+                title: tr(context, ko: '다가오는 만기', en: 'Upcoming Due Dates'),
+                subtitle: tr(context, ko: '완료되지 않은 기록 중 기한이 가까운 항목을 우선적으로 확인합니다.', en: 'Prioritize unfinished records with nearby due dates.'),
                 child: upcomingDue.isEmpty
-                    ? const Text(
-                        '아직 설정된 만기 일정이 없습니다.',
+                    ? Text(
+                        tr(context, ko: '아직 설정된 만기 일정이 없습니다.', en: 'No due dates have been set yet.'),
                         style: TextStyle(color: Color(0xFF66718F), height: 1.45),
                       )
                     : Column(
@@ -895,11 +1285,13 @@ class _CalendarPageState extends State<_CalendarPage> {
 class _HeroHeaderCard extends StatelessWidget {
   const _HeroHeaderCard({
     required this.unresolvedAmount,
+    required this.inProgressCount,
     required this.unresolvedCount,
     required this.completedCount,
   });
 
   final double unresolvedAmount;
+  final int inProgressCount;
   final int unresolvedCount;
   final int completedCount;
 
@@ -907,10 +1299,9 @@ class _HeroHeaderCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final isCompact = constraints.maxWidth < 380;
         return Container(
           padding: const EdgeInsets.all(22),
-          constraints: const BoxConstraints(minHeight: 288),
+          constraints: const BoxConstraints(minHeight: 300),
           decoration: BoxDecoration(
             gradient: const LinearGradient(
               begin: Alignment.topLeft,
@@ -942,92 +1333,48 @@ class _HeroHeaderCard extends StatelessWidget {
                     shape: BoxShape.circle,
                     color: Colors.white.withValues(alpha: 0.08),
                   ),
+                  ),
                 ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '메모가 아니라,\n정리된 증거처럼.',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 28,
+                      height: 1.12,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    '차용, 거래, 정산 기록을 단정한 카드와 타임라인으로 남겨 필요한 순간 바로 꺼내볼 수 있게 합니다.',
+                    maxLines: 4,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Color(0xDCEAF2FF),
+                      height: 1.5,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      Expanded(child: _HeroStatPill(label: '진행중', value: '$inProgressCount건')),
+                      const SizedBox(width: 10),
+                      Expanded(child: _HeroStatPill(label: '미해결', value: '$unresolvedCount건')),
+                      const SizedBox(width: 10),
+                      Expanded(child: _HeroStatPill(label: '완료', value: '$completedCount건')),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  Align(
+                    alignment: Alignment.topCenter,
+                    child: _HeroAmountOrb(amount: unresolvedAmount),
+                  ),
+                ],
               ),
-              if (isCompact)
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      '메모가 아니라,\n정리된 증거처럼.',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 28,
-                        height: 1.12,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    const Text(
-                      '차용, 거래, 정산 기록을 단정한 카드와 타임라인으로 남겨 필요한 순간 바로 꺼내볼 수 있게 합니다.',
-                      maxLines: 4,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: Color(0xDCEAF2FF),
-                        height: 1.5,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Wrap(
-                      spacing: 10,
-                      runSpacing: 10,
-                      children: [
-                        _HeroStatPill(label: '미해결', value: '$unresolvedCount건'),
-                        _HeroStatPill(label: '완료', value: '$completedCount건'),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: _HeroAmountOrb(amount: unresolvedAmount),
-                    ),
-                  ],
-                )
-              else
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      '메모가 아니라,\n정리된 증거처럼.',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 28,
-                        height: 1.12,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    const Text(
-                      '차용, 거래, 정산 기록을 단정한 카드와 타임라인으로 남겨 필요한 순간 바로 꺼내볼 수 있게 합니다.',
-                      maxLines: 4,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: Color(0xDCEAF2FF),
-                        height: 1.5,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: Wrap(
-                            spacing: 10,
-                            runSpacing: 10,
-                            children: [
-                              _HeroStatPill(label: '미해결', value: '$unresolvedCount건'),
-                              _HeroStatPill(label: '완료', value: '$completedCount건'),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 14),
-                        _HeroAmountOrb(amount: unresolvedAmount),
-                      ],
-                    ),
-                  ],
-                ),
             ],
           ),
         );
@@ -1432,15 +1779,9 @@ class _HeroAmountOrb extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return SizedBox(
       width: 118,
       height: 118,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: Colors.white.withValues(alpha: 0.12),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.16)),
-      ),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
@@ -1491,28 +1832,33 @@ class _HeroStatPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(18),
         border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Text(
             label,
+            textAlign: TextAlign.center,
             style: const TextStyle(
               color: Color(0xCDEAF2FF),
               fontWeight: FontWeight.w600,
             ),
           ),
           const SizedBox(height: 4),
-          Text(
-            value,
-            style: const TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.w800,
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              value,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w800,
+              ),
             ),
           ),
         ],
@@ -1842,7 +2188,7 @@ class _GlassSearchFieldState extends State<_GlassSearchField> {
       controller: _controller,
       onChanged: widget.onChanged,
       decoration: InputDecoration(
-        hintText: '제목, 상대, 메모 검색',
+        hintText: tr(context, ko: '제목, 상대, 메모 검색', en: 'Search title, person, memo'),
         prefixIcon: const Icon(Icons.search_rounded),
         filled: true,
         fillColor: Colors.white.withValues(alpha: 0.86),
@@ -1893,21 +2239,19 @@ class _EvidenceBottomNav extends StatelessWidget {
     required this.selectedIndex,
     required this.onSelected,
     required this.onAdd,
-    required this.extraBottomPadding,
   });
 
   final List<_EvidenceNavItemData> items;
   final int selectedIndex;
   final ValueChanged<int> onSelected;
   final VoidCallback onAdd;
-  final double extraBottomPadding;
 
   @override
   Widget build(BuildContext context) {
     return Material(
       color: Colors.transparent,
       child: Padding(
-        padding: EdgeInsets.fromLTRB(14, 8, 14, 12 + extraBottomPadding),
+        padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
         child: SizedBox(
           height: 118,
           child: Stack(
@@ -2062,6 +2406,14 @@ class _EvidenceBottomNavItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final languageCode = Localizations.localeOf(context).languageCode;
+    final localizedLabel = switch (data.label) {
+      'home' => languageCode == 'ko' ? '홈' : 'Home',
+      'records' => languageCode == 'ko' ? '기록' : 'Records',
+      'calendar' => languageCode == 'ko' ? '달력' : 'Calendar',
+      'timeline' => languageCode == 'ko' ? '타임라인' : 'Timeline',
+      _ => data.label,
+    };
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Material(
@@ -2096,7 +2448,7 @@ class _EvidenceBottomNavItem extends StatelessWidget {
                   ),
                   const SizedBox(height: 5),
                   Text(
-                    data.label,
+                    localizedLabel,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -2138,24 +2490,69 @@ class _AdMobBannerBar extends StatefulWidget {
 class _AdMobBannerBarState extends State<_AdMobBannerBar> {
   BannerAd? _bannerAd;
   bool _loaded = false;
+  int? _loadedWidth;
 
-  String get _adUnitId {
-    if (Platform.isAndroid) {
-      return 'ca-app-pub-3940256099942544/6300978111';
-    }
-    if (Platform.isIOS) {
-      return 'ca-app-pub-3940256099942544/2934735716';
-    }
+  String get _fallbackAdUnitId {
+    if (Platform.isAndroid) return 'ca-app-pub-3940256099942544/6300978111';
+    if (Platform.isIOS) return 'ca-app-pub-3940256099942544/2934735716';
     return '';
+  }
+
+  Future<String> _resolveAdUnitId() async {
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      return '';
+    }
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client.getUrl(Uri.https('app-master.officialsite.kr', '/api/evidence-note/ad-settings'));
+      final response = await request.close();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return _fallbackAdUnitId;
+      }
+      final body = await response.transform(utf8.decoder).join();
+      final decoded = jsonDecode(body) as Map<String, dynamic>;
+      final data = decoded['data'];
+      if (data is! Map) {
+        return _fallbackAdUnitId;
+      }
+
+      if (Platform.isAndroid) {
+        return (data['android_banner_ad_id'] as String?)?.trim().isNotEmpty == true
+            ? data['android_banner_ad_id'] as String
+            : _fallbackAdUnitId;
+      }
+      return (data['ios_banner_ad_id'] as String?)?.trim().isNotEmpty == true
+          ? data['ios_banner_ad_id'] as String
+          : _fallbackAdUnitId;
+    } catch (_) {
+      return _fallbackAdUnitId;
+    } finally {
+      client.close(force: true);
+    }
   }
 
   @override
   void initState() {
     super.initState();
-    if (_adUnitId.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadBanner());
+  }
+
+  Future<void> _loadBanner() async {
+    if (!mounted) return;
+    final adUnitId = await _resolveAdUnitId();
+    if (!mounted || adUnitId.isEmpty) return;
+    final width = MediaQuery.sizeOf(context).width.truncate();
+    if (_loadedWidth == width && _bannerAd != null) return;
+
+    final adaptiveSize = await AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(width);
+    if (!mounted || adaptiveSize == null) return;
+
+    await _bannerAd?.dispose();
+    _loaded = false;
+    _loadedWidth = width;
     _bannerAd = BannerAd(
-      adUnitId: _adUnitId,
-      size: AdSize.banner,
+      adUnitId: adUnitId,
+      size: adaptiveSize,
       request: const AdRequest(),
       listener: BannerAdListener(
         onAdLoaded: (_) {
@@ -2164,6 +2561,11 @@ class _AdMobBannerBarState extends State<_AdMobBannerBar> {
         },
         onAdFailedToLoad: (ad, _) {
           ad.dispose();
+          if (!mounted) return;
+          setState(() {
+            _bannerAd = null;
+            _loaded = false;
+          });
         },
       ),
     )..load();
@@ -2177,20 +2579,16 @@ class _AdMobBannerBarState extends State<_AdMobBannerBar> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_loaded || _bannerAd == null) {
-      return const SizedBox.shrink();
+    if (_loadedWidth != MediaQuery.sizeOf(context).width.truncate()) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadBanner());
     }
-
-    return Container(
-      width: double.infinity,
-      color: Colors.transparent,
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 2),
-      child: Center(
-        child: SizedBox(
-          width: _bannerAd!.size.width.toDouble(),
-          height: _bannerAd!.size.height.toDouble(),
-          child: AdWidget(ad: _bannerAd!),
-        ),
+    return SafeArea(
+      top: false,
+      minimum: EdgeInsets.zero,
+      child: SizedBox(
+        width: double.infinity,
+        height: _loaded && _bannerAd != null ? _bannerAd!.size.height.toDouble() : 0,
+        child: _loaded && _bannerAd != null ? AdWidget(ad: _bannerAd!) : const SizedBox.shrink(),
       ),
     );
   }
@@ -2304,23 +2702,131 @@ class _EditorActionChip extends StatelessWidget {
   }
 }
 
+class _EditorToolCard extends StatelessWidget {
+  const _EditorToolCard({
+    required this.onPressed,
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    this.active = false,
+  });
+
+  final VoidCallback onPressed;
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    final cardBackground = active ? const Color(0xFFFFF1F2) : Colors.white.withValues(alpha: 0.96);
+    final cardBorder = active ? const Color(0xFFF1A7AF) : const Color(0xFFD7E1EC);
+    final iconBackground = active ? const Color(0xFFFED7DC) : const Color(0xFFF3F6FA);
+    final iconBorder = active ? const Color(0xFFF4B7BE) : const Color(0xFFE1E7EF);
+    final iconColor = active ? const Color(0xFFC62839) : const Color(0xFF183B56);
+    final titleColor = active ? const Color(0xFF9F1D2D) : const Color(0xFF17203A);
+    final subtitleColor = active ? const Color(0xFFB03A48) : const Color(0xFF66718F);
+    final actionColor = active ? const Color(0xFFC62839) : const Color(0xFF183B56);
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(24),
+        child: SizedBox(
+          width: double.infinity,
+          child: Ink(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: cardBackground,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: cardBorder),
+              boxShadow: [
+                BoxShadow(
+                  color: (active ? const Color(0xFFC62839) : const Color(0xFF183B56)).withValues(alpha: 0.06),
+                  blurRadius: 18,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: iconBackground,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: iconBorder),
+                  ),
+                  child: Icon(icon, color: iconColor, size: 20),
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: titleColor,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 15,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    color: subtitleColor,
+                    height: 1.4,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Text(
+                      active ? '녹음 중' : '열기',
+                      style: TextStyle(
+                        color: actionColor,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Icon(
+                      active ? Icons.fiber_manual_record_rounded : Icons.arrow_forward_rounded,
+                      size: 16,
+                      color: actionColor,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _PromiseListTab extends StatelessWidget {
-  const _PromiseListTab({required this.records, required this.onOpen, required this.onDelete});
+  const _PromiseListTab({
+    required this.records,
+    required this.onOpen,
+    required this.onDelete,
+    required this.onExportPdf,
+    required this.onSharePdf,
+  });
 
   final List<EvidenceRecord> records;
   final Future<void> Function({EvidenceRecord? existing}) onOpen;
   final Future<void> Function(EvidenceRecord record) onDelete;
+  final Future<void> Function(EvidenceRecord record) onExportPdf;
+  final Future<void> Function(EvidenceRecord record) onSharePdf;
 
   @override
   Widget build(BuildContext context) {
-    if (records.isEmpty) {
-      return const _EmptyState(
-        title: '아직 기록이 없습니다',
-        body: '새 기록을 만들면 거래/약속/증거가 타임라인으로 정리됩니다.',
-      );
-    }
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(20, 4, 20, 120),
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 170),
       itemCount: records.length,
       separatorBuilder: (_, __) => const SizedBox(height: 12),
       itemBuilder: (context, index) {
@@ -2347,12 +2853,18 @@ class _PromiseListTab extends StatelessWidget {
                         onSelected: (value) {
                           if (value == 'edit') {
                             onOpen(existing: record);
+                          } else if (value == 'export_pdf') {
+                            unawaited(onExportPdf(record));
+                          } else if (value == 'share_pdf') {
+                            unawaited(onSharePdf(record));
                           } else if (value == 'delete') {
                             onDelete(record);
                           }
                         },
                         itemBuilder: (_) => const [
                           PopupMenuItem(value: 'edit', child: Text('수정')),
+                          PopupMenuItem(value: 'export_pdf', child: Text('PDF 내보내기')),
+                          PopupMenuItem(value: 'share_pdf', child: Text('PDF 공유')),
                           PopupMenuItem(value: 'delete', child: Text('삭제')),
                         ],
                       ),
@@ -2386,10 +2898,9 @@ class _PromiseListTab extends StatelessWidget {
                       children: [
                         Text('증거 요약', style: TextStyle(fontWeight: FontWeight.w900, color: record.status.color)),
                         const SizedBox(height: 8),
-                        Text('타임스탬프 ${formatDateTime(record.createdAt)}'),
+                        Text('시각 ${formatDateTime(record.createdAt)}'),
                         Text('고유 ID ${record.proofId}'),
                         Text('해시 ${record.proofHash.substring(0, min(16, record.proofHash.length))}...'),
-                        Text('기기 ${record.deviceSummary}'),
                         if ((record.amount ?? 0) > 0) ...[
                           const SizedBox(height: 10),
                           Text(
@@ -2513,6 +3024,7 @@ class EvidenceEditorPage extends StatefulWidget {
     this.embedded = false,
     this.onSaved,
     this.onCancel,
+    this.onSavingChanged,
   });
 
   final EvidenceRepository repository;
@@ -2520,6 +3032,7 @@ class EvidenceEditorPage extends StatefulWidget {
   final bool embedded;
   final Future<void> Function()? onSaved;
   final VoidCallback? onCancel;
+  final ValueChanged<bool>? onSavingChanged;
 
   @override
   State<EvidenceEditorPage> createState() => _EvidenceEditorPageState();
@@ -2550,6 +3063,16 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
   final AudioRecorder _audioRecorder = AudioRecorder();
   String? _recordingPath;
   bool _recording = false;
+
+  void _setSaving(bool value) {
+    if (_saving == value) return;
+    if (mounted) {
+      setState(() => _saving = value);
+    } else {
+      _saving = value;
+    }
+    widget.onSavingChanged?.call(value);
+  }
 
   @override
   void initState() {
@@ -2632,6 +3155,7 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
   }
 
   Future<void> _connectContact() async {
+    FocusScope.of(context).unfocus(disposition: UnfocusDisposition.scope);
     final granted = await FlutterContacts.requestPermission(readonly: true);
     if (!granted) {
       await showAppToast('연락처 권한이 필요합니다. 설정에서 허용해 주세요.');
@@ -2694,18 +3218,46 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
       _contactController.text = phone.isEmpty ? selected.displayName : '${selected.displayName} · $phone';
       _contactId = selected.id;
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      FocusScope.of(context).unfocus(disposition: UnfocusDisposition.scope);
+    });
   }
 
   Future<void> _addPhoto() async {
+    final existingPhotoAttachments = _attachments.where((item) => item.type == AttachmentType.photo).toList();
+    final initialSelectedIds = existingPhotoAttachments
+        .map(_photoAssetIdFromAttachment)
+        .whereType<String>()
+        .toList();
+
     final selectedAssets = await Navigator.of(context).push<List<AssetEntity>>(
       MaterialPageRoute(
-        builder: (_) => const PhotoPickerPage(initialSelectedIds: []),
+        builder: (_) => PhotoPickerPage(initialSelectedIds: initialSelectedIds),
       ),
     );
-    if (selectedAssets == null || selectedAssets.isEmpty) return;
+    if (selectedAssets == null) return;
+
+    final selectedAssetIds = selectedAssets.map((asset) => asset.id).toSet();
+    final preservedAttachments = _attachments.where((item) {
+      if (item.type != AttachmentType.photo) {
+        return true;
+      }
+      final assetId = _photoAssetIdFromAttachment(item);
+      return assetId != null && selectedAssetIds.contains(assetId);
+    }).toList();
+
+    final alreadyAttachedPhotoIds = preservedAttachments
+        .where((item) => item.type == AttachmentType.photo)
+        .map(_photoAssetIdFromAttachment)
+        .whereType<String>()
+        .toSet();
 
     final newAttachments = <AttachmentItem>[];
     for (final asset in selectedAssets) {
+      if (alreadyAttachedPhotoIds.contains(asset.id)) {
+        continue;
+      }
       final sourceFile = await asset.file;
       if (sourceFile == null) {
         continue;
@@ -2715,15 +3267,24 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
         sourceFile,
         'photo_${DateTime.now().millisecondsSinceEpoch}_${asset.id}.$extension',
       );
-      newAttachments.add(AttachmentItem.photo(file.path));
-    }
-    if (newAttachments.isEmpty) {
-      await showAppToast('선택한 사진을 불러오지 못했습니다.');
-      return;
+      newAttachments.add(
+        AttachmentItem.photo(
+          file.path,
+          localUploadKey: _attachmentUploadKey(AttachmentType.photo),
+          localAssetId: asset.id,
+        ),
+      );
     }
     setState(() {
-      _attachments.addAll(newAttachments);
+      _attachments = [
+        ...preservedAttachments,
+        ...newAttachments,
+      ];
     });
+
+    if (selectedAssets.isNotEmpty && newAttachments.isEmpty && alreadyAttachedPhotoIds.length != selectedAssets.length) {
+      await showAppToast('일부 선택한 사진을 불러오지 못했습니다.');
+    }
   }
 
   Future<void> _toggleRecording() async {
@@ -2733,7 +3294,12 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
         final file = File(path);
         final copied = await _copyAttachment(file, 'voice_${DateTime.now().millisecondsSinceEpoch}.m4a');
         setState(() {
-          _attachments.add(AttachmentItem.audio(copied.path));
+          _attachments.add(
+            AttachmentItem.audio(
+              copied.path,
+              localUploadKey: _attachmentUploadKey(AttachmentType.audio),
+            ),
+          );
           _recording = false;
           _recordingPath = null;
         });
@@ -2756,11 +3322,19 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
 
   Future<void> _saveSignature() async {
     final data = await _signatureController.toPngBytes(height: 240, width: 600);
-    if (data == null) return;
+    if (data == null || data.isEmpty) {
+      await showAppToast('서명을 먼저 입력해 주세요.');
+      return;
+    }
     final file = await _writeBytesAttachment(data, 'signature_${DateTime.now().millisecondsSinceEpoch}.png');
     setState(() {
       _signatureBytes = data;
-      _attachments.add(AttachmentItem.signature(file.path));
+      _attachments.add(
+        AttachmentItem.signature(
+          file.path,
+          localUploadKey: _attachmentUploadKey(AttachmentType.signature),
+        ),
+      );
     });
     _signatureController.clear();
     if (!mounted) return;
@@ -2771,43 +3345,49 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      builder: (context) => Padding(
-        padding: EdgeInsets.only(
-          left: 20,
-          right: 20,
-          top: 20,
-          bottom: MediaQuery.of(context).viewInsets.bottom + 20,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('간단 서명', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
-            const SizedBox(height: 12),
-            Container(
-              decoration: BoxDecoration(color: const Color(0xFFF7F9FF), borderRadius: BorderRadius.circular(20)),
-              child: Signature(controller: _signatureController, height: 220, backgroundColor: const Color(0xFFF7F9FF)),
+      builder: (context) {
+        final mediaQuery = MediaQuery.of(context);
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: 20,
+              right: 20,
+              top: 20,
+              bottom: mediaQuery.viewInsets.bottom + mediaQuery.padding.bottom + 20,
             ),
-            const SizedBox(height: 12),
-            Row(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: _signatureController.clear,
-                    child: const Text('지우기'),
-                  ),
+                const Text('간단 서명', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
+                const SizedBox(height: 12),
+                Container(
+                  decoration: BoxDecoration(color: const Color(0xFFF7F9FF), borderRadius: BorderRadius.circular(20)),
+                  child: Signature(controller: _signatureController, height: 220, backgroundColor: const Color(0xFFF7F9FF)),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton(
-                    onPressed: _saveSignature,
-                    child: const Text('서명 저장'),
-                  ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: _signatureController.clear,
+                        child: const Text('지우기'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: _saveSignature,
+                        child: const Text('서명 저장'),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
@@ -2832,13 +3412,30 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
     return dir;
   }
 
+  Future<List<AttachmentItem>> _uploadAttachmentsIfNeeded() async {
+    final uploaded = <AttachmentItem>[];
+    for (final item in _attachments) {
+      uploaded.add(await EvidenceApiService.instance.uploadAttachment(item));
+    }
+    return uploaded;
+  }
+
   Future<void> _save() async {
     if (_saving) return;
     if (_titleController.text.trim().isEmpty || _counterpartyController.text.trim().isEmpty) {
       await showAppToast('제목과 상대 이름은 필수입니다.');
       return;
     }
-    setState(() => _saving = true);
+    _setSaving(true);
+
+    List<AttachmentItem> uploadedAttachments;
+    try {
+      uploadedAttachments = await _uploadAttachmentsIfNeeded();
+    } catch (_) {
+      _setSaving(false);
+      await showAppToast('첨부 업로드에 실패했습니다. 네트워크를 확인해 주세요.');
+      return;
+    }
 
     final existing = widget.existing;
     final now = DateTime.now();
@@ -2858,7 +3455,7 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
       'contactId': _contactId,
       'contactLabel': _contactController.text.trim(),
       'deviceSummary': deviceSummary,
-      'attachments': _attachments.map((item) => item.toJson()).toList(),
+      'attachments': uploadedAttachments.map((item) => item.toJson()).toList(),
       'dueAt': dueAt?.toIso8601String(),
       'reminderAt': reminderAt?.toIso8601String(),
       'updatedAt': now.toIso8601String(),
@@ -2871,8 +3468,8 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
     } else {
       timeline.insert(0, TimelineEvent.create(TimelineEventType.edited, '내용을 수정했습니다.', now));
     }
-    if (_attachments.isNotEmpty) {
-      timeline.insert(0, TimelineEvent.create(TimelineEventType.attachmentAdded, '증거 첨부 ${_attachments.length}건이 연결되었습니다.', now));
+    if (uploadedAttachments.isNotEmpty) {
+      timeline.insert(0, TimelineEvent.create(TimelineEventType.attachmentAdded, '증거 첨부 ${uploadedAttachments.length}건이 연결되었습니다.', now));
     }
     if (dueAt != null) {
       timeline.insert(0, TimelineEvent.create(TimelineEventType.edited, '만기 일정을 ${formatDateTime(dueAt)}로 설정했습니다.', now));
@@ -2897,7 +3494,7 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
       status: _status,
       proofHash: proofHash,
       deviceSummary: deviceSummary,
-      attachments: _attachments,
+      attachments: uploadedAttachments,
       timeline: timeline.take(60).toList(),
       dailyLossRate: double.tryParse(_lossRateController.text.trim()) ?? 0.0008,
       dueAt: dueAt,
@@ -2905,16 +3502,42 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
       notificationId: existing?.notificationId ?? _buildNotificationId(),
     );
 
-    await widget.repository.saveRecord(record);
-    await ReminderService.instance.schedule(record);
-    if (!mounted) return;
-    setState(() => _saving = false);
-    await showAppToast(existing == null ? '증거 기록을 저장했습니다.' : '기록을 수정했습니다.');
-    if (widget.embedded) {
-      await widget.onSaved?.call();
+    try {
+      await widget.repository.saveRecord(record);
+      _attachments = uploadedAttachments;
+      await ReminderService.instance.schedule(record);
+      await EvidenceInterstitialAdService.instance.onRecordSaved();
+      _setSaving(false);
+      await showAppToast(existing == null ? '증거 기록을 저장했습니다.' : '기록을 수정했습니다.');
+      if (widget.embedded) {
+        await widget.onSaved?.call();
+        return;
+      }
+      if (!mounted) return;
+      Navigator.pop(context, true);
+    } catch (_) {
+      _setSaving(false);
+      await showAppToast('저장 중 오류가 발생했습니다. 다시 시도해 주세요.');
+    }
+  }
+
+  Future<void> _shareSummary() async {
+    final title = _titleController.text.trim();
+    final counterparty = _counterpartyController.text.trim();
+    final memo = _memoController.text.trim();
+
+    if (title.isEmpty && counterparty.isEmpty && memo.isEmpty) {
+      await showAppToast('공유할 제목이나 메모를 먼저 입력해 주세요.');
       return;
     }
-    Navigator.pop(context, true);
+
+    final text = [title, counterparty, memo].where((e) => e.isNotEmpty).join('\n');
+    if (text.trim().isEmpty) {
+      await showAppToast('공유할 내용이 아직 없습니다.');
+      return;
+    }
+
+    await SharePlus.instance.share(ShareParams(text: text));
   }
 
   int _buildNotificationId() => widget.existing?.notificationId ?? DateTime.now().millisecondsSinceEpoch.remainder(1 << 30);
@@ -2925,9 +3548,15 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
       await showAppToast('먼저 제목을 입력해 주세요.');
       return;
     }
+    final regularFont = await _loadPdfRegularFont();
+    final boldFont = await _loadPdfBoldFont();
     final pdf = pw.Document();
     pdf.addPage(
       pw.MultiPage(
+        theme: pw.ThemeData.withFont(
+          base: regularFont,
+          bold: boldFont,
+        ),
         build: (_) => [
           pw.Text('증거노트 요약', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold)),
           pw.SizedBox(height: 16),
@@ -2953,22 +3582,14 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
     await Printing.layoutPdf(onLayout: (_) => pdf.save());
   }
 
+  Future<void> triggerSave() async => _save();
+
   @override
   Widget build(BuildContext context) {
     final isEditing = widget.existing != null;
-    final amountValue = double.tryParse(_amountController.text.replaceAll(',', '').trim());
     final attachmentPhotoCount = _attachments.where((item) => item.type == AttachmentType.photo).length;
     final attachmentAudioCount = _attachments.where((item) => item.type == AttachmentType.audio).length;
     final attachmentSignatureCount = _attachments.where((item) => item.type == AttachmentType.signature).length;
-    final estimatedLoss = amountValue == null
-        ? null
-        : estimateLoss(
-            EvidenceRecord.preview(
-              amount: amountValue,
-              eventAt: _useCurrentTime ? DateTime.now() : _eventAt,
-              dailyLossRate: double.tryParse(_lossRateController.text.trim()) ?? 0.0008,
-            ),
-          );
 
     final content = SafeArea(
       top: false,
@@ -2979,47 +3600,9 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
             padding: EdgeInsets.fromLTRB(20, widget.embedded ? 16 : 12, 20, widget.embedded ? 176 : 156),
             children: [
               _section(
-                title: isEditing ? '현재 기록 개요' : '새 증거 기록 개요',
-                subtitle: '입력한 정보가 저장 전에 어떤 구조로 정리되는지 바로 확인할 수 있습니다.',
-                accent: _status.color,
-                header: Wrap(
-                  spacing: 10,
-                  runSpacing: 10,
-                  children: [
-                    _summaryPill(Icons.flag_rounded, _status.label, _status.color),
-                    _summaryPill(Icons.schedule_rounded, _useCurrentTime ? '현재 시각 저장' : formatDateTime(_eventAt), const Color(0xFF183B56)),
-                    if (_hasDueDate) _summaryPill(Icons.event_repeat_rounded, formatDateTime(_dueAt), const Color(0xFF7C3AED)),
-                    if (_reminderEnabled) _summaryPill(Icons.notifications_active_rounded, formatDateTime(_reminderAt), const Color(0xFFD97706)),
-                    _summaryPill(Icons.attachment_rounded, '첨부 ${_attachments.length}건', const Color(0xFF48617D)),
-                  ],
-                ),
-                child: Column(
-                  children: [
-                    _heroLine(
-                      title: _titleController.text.trim().isEmpty ? '제목을 입력해 기록의 맥락을 분명히 해주세요.' : _titleController.text.trim(),
-                      subtitle: _counterpartyController.text.trim().isEmpty
-                          ? '상대 이름과 거래 메모가 들어가면 기록이 더 선명해집니다.'
-                          : '${_counterpartyController.text.trim()}와의 약속/거래를 정리 중입니다.',
-                      amountText: amountValue == null ? '금액 미입력' : formatAmount(amountValue),
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        Expanded(child: _infoMetric('메모 길이', '${_memoController.text.trim().isEmpty ? 0 : _memoController.text.trim().length}자')),
-                        const SizedBox(width: 10),
-                        Expanded(child: _infoMetric('연락처 연동', _contactId == null ? '미연결' : '연결됨')),
-                        const SizedBox(width: 10),
-                        Expanded(child: _infoMetric('증거 밀도', _attachments.isEmpty ? '초안' : '보강됨')),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 16),
-              _section(
                 title: '핵심 정보',
                 subtitle: '상대, 금액, 시점 같은 기본 골격을 먼저 정돈합니다.',
-                accent: const Color(0xFF3457F1),
+                accent: const Color(0xFF183B56),
                 child: Column(
                   children: [
                     _textField(_titleController, '제목', hint: '예: 김OO에게 50만원을 빌려준 약속'),
@@ -3078,18 +3661,55 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
                 ),
                 child: Column(
                   children: [
-                    Wrap(
-                      spacing: 10,
-                      runSpacing: 10,
-                      children: [
-                        _EditorActionChip(onPressed: _addPhoto, icon: Icons.photo_library_rounded, label: '사진 첨부'),
-                        _EditorActionChip(
-                          onPressed: _toggleRecording,
-                          icon: _recording ? Icons.stop_circle_outlined : Icons.mic_rounded,
-                          label: _recording ? '녹음 종료' : '음성 녹음',
-                        ),
-                        _EditorActionChip(onPressed: _openSignatureSheet, icon: Icons.draw_rounded, label: '서명 추가'),
-                      ],
+                    LayoutBuilder(
+                      builder: (context, constraints) {
+                        final cardWidth = constraints.maxWidth >= 860
+                            ? (constraints.maxWidth - 20) / 3
+                            : constraints.maxWidth >= 680
+                            ? (constraints.maxWidth - 12) / 2.15
+                            : constraints.maxWidth * 0.72;
+
+                        return SizedBox(
+                          height: 188,
+                          child: ListView(
+                            scrollDirection: Axis.horizontal,
+                            physics: const BouncingScrollPhysics(),
+                            clipBehavior: Clip.none,
+                            children: [
+                              SizedBox(
+                                width: cardWidth,
+                                child: _EditorToolCard(
+                                  onPressed: _addPhoto,
+                                  icon: Icons.photo_library_rounded,
+                                  title: '사진 첨부',
+                                  subtitle: '캡처, 이체 내역, 대화 이미지를 연결',
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              SizedBox(
+                                width: cardWidth,
+                                child: _EditorToolCard(
+                                  onPressed: _toggleRecording,
+                                  icon: _recording ? Icons.stop_circle_outlined : Icons.mic_rounded,
+                                  title: _recording ? '녹음 종료' : '음성 녹음',
+                                  subtitle: _recording ? '현재 녹음 중인 파일을 저장' : '상대 음성이나 현장 녹음을 추가',
+                                  active: _recording,
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              SizedBox(
+                                width: cardWidth,
+                                child: _EditorToolCard(
+                                  onPressed: _openSignatureSheet,
+                                  icon: Icons.draw_rounded,
+                                  title: '서명 추가',
+                                  subtitle: '간단한 확인 서명을 증거와 함께 보관',
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
                     ),
                     const SizedBox(height: 14),
                     if (_attachments.isEmpty)
@@ -3113,77 +3733,6 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
                           onRemove: () => setState(() => _attachments.removeAt(entry.key)),
                         ),
                       ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 16),
-              _section(
-                title: '메타 정보와 후속 관리',
-                subtitle: '저장 시점의 기기 정보와 손해 추정, 공유 흐름까지 함께 다룹니다.',
-                accent: const Color(0xFFD14D1F),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (isWide)
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(child: _textField(_deviceController, '기기 정보', hint: defaultDeviceSummary())),
-                          const SizedBox(width: 12),
-                          Expanded(child: _textField(_lossRateController, '일 손해 추정 비율', keyboardType: const TextInputType.numberWithOptions(decimal: true))),
-                        ],
-                      )
-                    else ...[
-                      _textField(_deviceController, '기기 정보', hint: defaultDeviceSummary()),
-                      const SizedBox(height: 12),
-                      _textField(_lossRateController, '일 손해 추정 비율', keyboardType: const TextInputType.numberWithOptions(decimal: true)),
-                    ],
-                    const SizedBox(height: 14),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFFF7F2),
-                        borderRadius: BorderRadius.circular(22),
-                        border: Border.all(color: const Color(0xFFF0D8C9)),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('후속 안내', style: TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF9B4D26))),
-                          const SizedBox(height: 6),
-                          Text(
-                            estimatedLoss?.message ?? '금액을 입력하면 지연 기간에 따른 손해 추정 메시지가 표시됩니다.',
-                            style: const TextStyle(color: Color(0xFF9B4D26), fontWeight: FontWeight.w600, height: 1.45),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    const Text(
-                      '저장 순간 타임스탬프, 고유 ID, 해시값, 기기 정보가 자동 갱신됩니다.',
-                      style: TextStyle(color: Color(0xFF66718F), height: 1.45),
-                    ),
-                    const SizedBox(height: 14),
-                    Wrap(
-                      spacing: 10,
-                      runSpacing: 10,
-                      children: [
-                        _EditorActionChip(onPressed: _exportPdf, icon: Icons.picture_as_pdf_rounded, label: 'PDF 생성'),
-                        _EditorActionChip(
-                          onPressed: () async {
-                            final text = [
-                              _titleController.text.trim(),
-                              _counterpartyController.text.trim(),
-                              _memoController.text.trim(),
-                            ].where((e) => e.isNotEmpty).join('\n');
-                            await SharePlus.instance.share(ShareParams(text: text));
-                          },
-                          icon: Icons.ios_share_rounded,
-                          label: '공유 보내기',
-                        ),
-                      ],
-                    ),
                   ],
                 ),
               ),
@@ -3221,24 +3770,11 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
                 letterSpacing: -0.5,
               ),
             ),
-            const SizedBox(height: 4),
-            Text(
-              isEditing ? '핵심 내용과 증거 자료를 더 명확하게 정리합니다.' : '약속, 거래, 첨부 자료를 한 화면에서 정돈해 저장합니다.',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontFamily: 'Pretendard',
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-                color: Color(0xFF66718F),
-                height: 1.28,
-              ),
-            ),
           ],
         ),
         actions: [
           Padding(
-            padding: const EdgeInsets.only(right: 12),
+            padding: const EdgeInsets.only(right: 4),
             child: IconButton.filledTonal(
               onPressed: _exportPdf,
               style: IconButton.styleFrom(
@@ -3248,64 +3784,52 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
               icon: const Icon(Icons.picture_as_pdf_rounded),
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: FilledButton(
+              onPressed: _saving ? null : _save,
+              style: FilledButton.styleFrom(
+                backgroundColor: _saving ? const Color(0xFFBCC5D1) : const Color(0xFF183B56),
+                disabledBackgroundColor: const Color(0xFFBCC5D1),
+                foregroundColor: Colors.white,
+                disabledForegroundColor: Colors.white,
+                minimumSize: const Size(0, 42),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                textStyle: const TextStyle(
+                  fontFamily: 'Pretendard',
+                  fontWeight: FontWeight.w800,
+                  fontSize: 15,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_saving) ...[
+                    const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.2,
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  Text(_saving ? '저장 중' : '저장'),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
-      bottomNavigationBar: SafeArea(
+      bottomNavigationBar: const SafeArea(
         top: false,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const _AdMobBannerBar(),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(28),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-                  child: Container(
-                    padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.86),
-                      borderRadius: BorderRadius.circular(28),
-                      border: Border.all(color: Colors.white.withValues(alpha: 0.92)),
-                    ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                isEditing ? '수정 내용을 저장할 준비가 되었습니다' : '기록 초안을 바로 저장할 수 있습니다',
-                                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFF17203A)),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                '첨부 ${_attachments.length}건 · ${_hasDueDate ? '만기 있음' : '만기 없음'}',
-                                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Color(0xFF66718F)),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 14),
-                        FilledButton.icon(
-                          onPressed: _saving ? null : _save,
-                          icon: Icon(_saving ? Icons.hourglass_top_rounded : Icons.save_rounded),
-                          label: Text(_saving ? '저장 중' : '저장'),
-                          style: FilledButton.styleFrom(
-                            minimumSize: const Size(136, 56),
-                            backgroundColor: const Color(0xFF183B56),
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
+            SizedBox(height: 10),
+            _AdMobBannerBar(),
           ],
         ),
       ),
@@ -3817,6 +4341,7 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
     required AttachmentItem item,
     required VoidCallback onRemove,
   }) {
+    final isPhoto = item.type == AttachmentType.photo;
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
@@ -3827,15 +4352,33 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
       ),
       child: Row(
         children: [
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              color: const Color(0xFFEAF0FF),
+          if (isPhoto)
+            ClipRRect(
               borderRadius: BorderRadius.circular(14),
+              child: SizedBox(
+                width: 54,
+                height: 54,
+                child: Image.file(
+                  File(item.path),
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => Container(
+                    color: const Color(0xFFEAF0FF),
+                    alignment: Alignment.center,
+                    child: const Icon(Icons.photo_rounded, color: Color(0xFF3457F1)),
+                  ),
+                ),
+              ),
+            )
+          else
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                color: const Color(0xFFEAF0FF),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Icon(item.type.icon, color: const Color(0xFF3457F1)),
             ),
-            child: Icon(item.type.icon, color: const Color(0xFF3457F1)),
-          ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(

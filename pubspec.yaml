@@ -14,11 +14,13 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.8
   crypto: ^3.0.6
+  device_info_plus: ^11.1.0
   flutter_contacts: ^1.1.9+2
   flutter_local_notifications: ^18.0.1
   fluttertoast: ^8.2.12
   google_mobile_ads: ^5.1.0
   image_picker: ^1.2.0
+  http: ^1.2.2
   path_provider: ^2.1.5
   pdf: ^3.11.3
   photo_manager: ^3.7.1

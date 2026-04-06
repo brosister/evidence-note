@@ -129,6 +129,15 @@ enum PromiseStatus {
   const PromiseStatus(this.label, this.color);
   final String label;
   final Color color;
+
+  String localizedLabel(String languageCode) {
+    final isKo = languageCode == 'ko';
+    return switch (this) {
+      PromiseStatus.inProgress => isKo ? '진행중' : 'In Progress',
+      PromiseStatus.completed => isKo ? '완료됨' : 'Completed',
+      PromiseStatus.unresolved => isKo ? '미해결' : 'Unresolved',
+    };
+  }
 }
 
 enum AttachmentType {
@@ -139,28 +148,122 @@ enum AttachmentType {
   const AttachmentType(this.label, this.icon);
   final String label;
   final IconData icon;
+
+  String localizedLabel(String languageCode) {
+    final isKo = languageCode == 'ko';
+    return switch (this) {
+      AttachmentType.photo => isKo ? '사진' : 'Photo',
+      AttachmentType.audio => isKo ? '음성' : 'Audio',
+      AttachmentType.signature => isKo ? '서명' : 'Signature',
+    };
+  }
 }
 
 class AttachmentItem {
-  const AttachmentItem({required this.type, required this.path});
+  const AttachmentItem({
+    required this.type,
+    required this.path,
+    this.localUploadKey,
+    this.localAssetId,
+    this.remoteUrl,
+    this.remoteStorageKey,
+    this.uploadedAt,
+  });
 
-  factory AttachmentItem.photo(String path) => AttachmentItem(type: AttachmentType.photo, path: path);
-  factory AttachmentItem.audio(String path) => AttachmentItem(type: AttachmentType.audio, path: path);
-  factory AttachmentItem.signature(String path) => AttachmentItem(type: AttachmentType.signature, path: path);
+  factory AttachmentItem.photo(
+    String path, {
+    String? localUploadKey,
+    String? localAssetId,
+    String? remoteUrl,
+    String? remoteStorageKey,
+    DateTime? uploadedAt,
+  }) =>
+      AttachmentItem(
+        type: AttachmentType.photo,
+        path: path,
+        localUploadKey: localUploadKey,
+        localAssetId: localAssetId,
+        remoteUrl: remoteUrl,
+        remoteStorageKey: remoteStorageKey,
+        uploadedAt: uploadedAt,
+      );
+  factory AttachmentItem.audio(
+    String path, {
+    String? localUploadKey,
+    String? remoteUrl,
+    String? remoteStorageKey,
+    DateTime? uploadedAt,
+  }) =>
+      AttachmentItem(
+        type: AttachmentType.audio,
+        path: path,
+        localUploadKey: localUploadKey,
+        remoteUrl: remoteUrl,
+        remoteStorageKey: remoteStorageKey,
+        uploadedAt: uploadedAt,
+      );
+  factory AttachmentItem.signature(
+    String path, {
+    String? localUploadKey,
+    String? remoteUrl,
+    String? remoteStorageKey,
+    DateTime? uploadedAt,
+  }) =>
+      AttachmentItem(
+        type: AttachmentType.signature,
+        path: path,
+        localUploadKey: localUploadKey,
+        remoteUrl: remoteUrl,
+        remoteStorageKey: remoteStorageKey,
+        uploadedAt: uploadedAt,
+      );
 
   final AttachmentType type;
   final String path;
+  final String? localUploadKey;
+  final String? localAssetId;
+  final String? remoteUrl;
+  final String? remoteStorageKey;
+  final DateTime? uploadedAt;
 
   String get label => type.label;
+
+  AttachmentItem copyWith({
+    String? path,
+    String? localUploadKey,
+    String? localAssetId,
+    String? remoteUrl,
+    String? remoteStorageKey,
+    DateTime? uploadedAt,
+  }) =>
+      AttachmentItem(
+        type: type,
+        path: path ?? this.path,
+        localUploadKey: localUploadKey ?? this.localUploadKey,
+        localAssetId: localAssetId ?? this.localAssetId,
+        remoteUrl: remoteUrl ?? this.remoteUrl,
+        remoteStorageKey: remoteStorageKey ?? this.remoteStorageKey,
+        uploadedAt: uploadedAt ?? this.uploadedAt,
+      );
 
   factory AttachmentItem.fromJson(Map<String, dynamic> json) => AttachmentItem(
         type: AttachmentType.values.byName(json['type'] as String),
         path: json['path'] as String,
+        localUploadKey: json['localUploadKey'] as String?,
+        localAssetId: json['localAssetId'] as String?,
+        remoteUrl: json['remoteUrl'] as String?,
+        remoteStorageKey: json['remoteStorageKey'] as String?,
+        uploadedAt: json['uploadedAt'] == null ? null : DateTime.parse(json['uploadedAt'] as String),
       );
 
   Map<String, dynamic> toJson() => {
         'type': type.name,
         'path': path,
+        'localUploadKey': localUploadKey,
+        'localAssetId': localAssetId,
+        'remoteUrl': remoteUrl,
+        'remoteStorageKey': remoteStorageKey,
+        'uploadedAt': uploadedAt?.toIso8601String(),
       };
 }
 

@@ -1,5 +1,6 @@
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter/services.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
@@ -48,23 +49,39 @@ class ReminderService {
     if (reminderAt.isBefore(now)) return;
 
     final dueLabel = record.dueAt == null ? '기한 미설정' : '만기 ${record.dueAt!.month}/${record.dueAt!.day}';
-    await _plugin.zonedSchedule(
-      record.notificationId,
-      record.amount != null && record.amount! > 0 ? '거래 리마인더' : '약속 리마인더',
-      '$dueLabel · ${record.title}',
-      tz.TZDateTime.from(reminderAt, tz.local),
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          kNotificationChannelId,
-          kNotificationChannelName,
-          importance: Importance.high,
-          priority: Priority.high,
-        ),
-        iOS: DarwinNotificationDetails(),
+    final details = const NotificationDetails(
+      android: AndroidNotificationDetails(
+        kNotificationChannelId,
+        kNotificationChannelName,
+        importance: Importance.high,
+        priority: Priority.high,
       ),
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+      iOS: DarwinNotificationDetails(),
     );
+    final scheduledAt = tz.TZDateTime.from(reminderAt, tz.local);
+
+    try {
+      await _plugin.zonedSchedule(
+        record.notificationId,
+        record.amount != null && record.amount! > 0 ? '거래 리마인더' : '약속 리마인더',
+        '$dueLabel · ${record.title}',
+        scheduledAt,
+        details,
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+      );
+    } on PlatformException catch (error) {
+      if (error.code != 'exact_alarms_not_permitted') rethrow;
+      await _plugin.zonedSchedule(
+        record.notificationId,
+        record.amount != null && record.amount! > 0 ? '거래 리마인더' : '약속 리마인더',
+        '$dueLabel · ${record.title}',
+        scheduledAt,
+        details,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+      );
+    }
   }
 
   Future<void> cancel(int id) => _plugin.cancel(id);

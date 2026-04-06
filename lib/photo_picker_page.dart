@@ -245,7 +245,14 @@ class _PhotoPickerPageState extends State<PhotoPickerPage> {
 
   Future<void> _completeSelection() async {
     final selectedIds = _selectedIds.value;
-    final selectedAssets = _assets.where((asset) => selectedIds.contains(asset.id)).toList();
+    final selectedAssets = <AssetEntity>[];
+    final currentAssetMap = {for (final asset in _assets) asset.id: asset};
+    for (final id in selectedIds) {
+      final asset = currentAssetMap[id] ?? await AssetEntity.fromId(id);
+      if (asset != null) {
+        selectedAssets.add(asset);
+      }
+    }
     Navigator.of(context).pop(selectedAssets);
   }
 

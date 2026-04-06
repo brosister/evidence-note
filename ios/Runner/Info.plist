@@ -50,7 +50,7 @@
 		<key>NSPhotoLibraryUsageDescription</key>
 		<string>이체 내역이나 대화 캡처를 첨부하기 위해 사진 보관함 접근이 필요합니다.</string>
 		<key>GADApplicationIdentifier</key>
-		<string>ca-app-pub-3940256099942544~1458002511</string>
+		<string>ca-app-pub-1472588829285826~1508373034</string>
 		<key>UIApplicationSupportsIndirectInputEvents</key>
 		<true/>
 		<key>UIStatusBarHidden</key>
