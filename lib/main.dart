@@ -62,6 +62,7 @@ class EvidenceNoteApp extends StatelessWidget {
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
       theme: ThemeData(
         useMaterial3: true,
+        fontFamily: 'Pretendard',
         scaffoldBackgroundColor: const Color(0xFFF4F7FF),
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF4E6BFF)),
         appBarTheme: const AppBarTheme(
