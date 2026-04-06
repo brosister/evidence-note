@@ -2017,7 +2017,7 @@ class _EvidenceAddButton extends StatelessWidget {
             boxShadow: [
               BoxShadow(
                 color: isSelected
-                    ? const Color(0xFF183B56).withValues(alpha: 0.22)
+                    ? const Color(0xFF183B56).withValues(alpha: 0.10)
                     : Colors.white.withValues(alpha: 0.18),
                 blurRadius: 10,
                 offset: const Offset(0, 1),
