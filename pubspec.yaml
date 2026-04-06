@@ -17,14 +17,19 @@ dependencies:
   flutter_contacts: ^1.1.9+2
   flutter_local_notifications: ^18.0.1
   fluttertoast: ^8.2.12
+  google_mobile_ads: ^5.1.0
   image_picker: ^1.2.0
   path_provider: ^2.1.5
   pdf: ^3.11.3
+  photo_manager: ^3.7.1
   printing: ^5.14.2
   record: ^6.1.2
   share_plus: ^11.1.0
   shared_preferences: ^2.3.3
   signature: ^6.3.0
+  flutter_timezone: ^4.1.1
+  table_calendar: ^3.1.2
+  timezone: ^0.10.0
   uuid: ^4.5.1
 
 dev_dependencies:
@@ -59,11 +64,11 @@ flutter_launcher_icons:
   remove_alpha_ios: true
 
 flutter_native_splash:
-  color: "#F4F7FF"
+  color: "#FFFFFF"
   image: assets/branding/evidence_note_logo.png
   android: true
   ios: true
   web: false
   android_12:
-    color: "#F4F7FF"
+    color: "#FFFFFF"
     image: assets/branding/evidence_note_logo.png

@@ -15,6 +15,12 @@ String formatDateTime(DateTime value) {
   return '${value.year}.$mm.$dd $hh:$minValue';
 }
 
+String formatDate(DateTime value) {
+  final mm = value.month.toString().padLeft(2, '0');
+  final dd = value.day.toString().padLeft(2, '0');
+  return '${value.year}.$mm.$dd';
+}
+
 String formatAmount(double value) {
   final rounded = value.round();
   final chars = rounded.toString().split('').reversed.toList();
@@ -30,7 +36,7 @@ LossEstimate estimateLoss(EvidenceRecord record) {
   final amount = record.amount ?? 0;
   final days = max(0, DateTime.now().difference(record.eventAt).inDays);
   final loss = amount * record.dailyLossRate * days;
-  return LossEstimate(days: days, amount: loss, message: '지금까지 ${days}일 지연 → 손해 ${formatAmount(loss)} 추정');
+  return LossEstimate(days: days, amount: loss, message: '지금까지 $days일 지연 → 손해 ${formatAmount(loss)} 추정');
 }
 
 Future<void> showAppToast(String message) async {

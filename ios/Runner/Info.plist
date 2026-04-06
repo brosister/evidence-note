@@ -49,6 +49,8 @@
 		<string>약속 관련 음성 증거를 녹음하기 위해 마이크 접근이 필요합니다.</string>
 		<key>NSPhotoLibraryUsageDescription</key>
 		<string>이체 내역이나 대화 캡처를 첨부하기 위해 사진 보관함 접근이 필요합니다.</string>
+		<key>GADApplicationIdentifier</key>
+		<string>ca-app-pub-3940256099942544~1458002511</string>
 		<key>UIApplicationSupportsIndirectInputEvents</key>
 		<true/>
 		<key>UIStatusBarHidden</key>

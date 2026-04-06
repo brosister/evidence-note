@@ -19,6 +19,8 @@ class EvidenceRecord {
     required this.attachments,
     required this.timeline,
     required this.dailyLossRate,
+    required this.dueAt,
+    required this.reminderAt,
     required this.notificationId,
   });
 
@@ -39,6 +41,8 @@ class EvidenceRecord {
   final List<AttachmentItem> attachments;
   final List<TimelineEvent> timeline;
   final double dailyLossRate;
+  final DateTime? dueAt;
+  final DateTime? reminderAt;
   final int notificationId;
 
   factory EvidenceRecord.preview({required double amount, required DateTime eventAt, required double dailyLossRate}) {
@@ -60,6 +64,8 @@ class EvidenceRecord {
       attachments: const [],
       timeline: const [],
       dailyLossRate: dailyLossRate,
+      dueAt: null,
+      reminderAt: null,
       notificationId: 0,
     );
   }
@@ -86,6 +92,8 @@ class EvidenceRecord {
             .map((item) => TimelineEvent.fromJson(Map<String, dynamic>.from(item as Map)))
             .toList(),
         dailyLossRate: (json['dailyLossRate'] as num?)?.toDouble() ?? 0.0008,
+        dueAt: json['dueAt'] == null ? null : DateTime.parse(json['dueAt'] as String),
+        reminderAt: json['reminderAt'] == null ? null : DateTime.parse(json['reminderAt'] as String),
         notificationId: json['notificationId'] as int? ?? 0,
       );
 
@@ -107,6 +115,8 @@ class EvidenceRecord {
         'attachments': attachments.map((e) => e.toJson()).toList(),
         'timeline': timeline.map((e) => e.toJson()).toList(),
         'dailyLossRate': dailyLossRate,
+        'dueAt': dueAt?.toIso8601String(),
+        'reminderAt': reminderAt?.toIso8601String(),
         'notificationId': notificationId,
       };
 }
