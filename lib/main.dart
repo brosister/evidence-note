@@ -33,8 +33,32 @@ import 'services/reminder_service.dart';
 import 'utils/app_formatters.dart';
 
 const _uuid = Uuid();
+const double _kPageBottomPadding = 24;
+const double _kEditorBottomPadding = 28;
+const double _kBottomNavSectionHeight = 136;
 Future<pw.Font>? _pdfRegularFontLoader;
 Future<pw.Font>? _pdfBoldFontLoader;
+
+double _bottomOverlayInset(BuildContext context, {double extra = _kPageBottomPadding}) {
+  final overlayHeight = _BottomOverlayScope.maybeOf(context) ?? 0;
+  return overlayHeight + extra;
+}
+
+class _BottomOverlayScope extends InheritedWidget {
+  const _BottomOverlayScope({
+    required this.overlayHeight,
+    required super.child,
+  });
+
+  final double overlayHeight;
+
+  static double? maybeOf(BuildContext context) {
+    return context.dependOnInheritedWidgetOfExactType<_BottomOverlayScope>()?.overlayHeight;
+  }
+
+  @override
+  bool updateShouldNotify(covariant _BottomOverlayScope oldWidget) => oldWidget.overlayHeight != overlayHeight;
+}
 
 Future<pw.Font> _loadPdfRegularFont() {
   return _pdfRegularFontLoader ??= rootBundle.load('assets/fonts/Pretendard-Regular.otf').then(
@@ -52,6 +76,8 @@ String _pdfSafeName(String source) {
   final normalized = source.trim().replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').replaceAll(RegExp(r'\s+'), '_');
   return normalized.isEmpty ? 'evidence_note' : normalized;
 }
+
+String _recordPdfFileName(EvidenceRecord record) => '${_pdfSafeName(record.title)}_${record.id}.pdf';
 
 String _attachmentUploadKey(AttachmentType type) => '${type.name}_${const Uuid().v4()}';
 
@@ -226,7 +252,7 @@ Future<File> _writeRecordPdfFile(EvidenceRecord record, String languageCode) asy
   if (!await exportDir.exists()) {
     await exportDir.create(recursive: true);
   }
-  final file = File('${exportDir.path}/${_pdfSafeName(record.title)}_${record.id}.pdf');
+  final file = File('${exportDir.path}/${_recordPdfFileName(record)}');
   await file.writeAsBytes(bytes, flush: true);
   return file;
 }
@@ -418,6 +444,8 @@ class _EvidenceHomePageState extends State<EvidenceHomePage> {
   String _searchQuery = '';
   int _selectedPage = 0;
   int _editorReturnPage = 0;
+  double _bannerHeight = 0;
+  DateTime? _lastBackPressedAt;
   EvidenceRecord? _editingRecord;
   bool _embeddedEditorSaving = false;
   GlobalKey<_EvidenceEditorPageState> _embeddedEditorKey = GlobalKey<_EvidenceEditorPageState>();
@@ -503,44 +531,85 @@ class _EvidenceHomePageState extends State<EvidenceHomePage> {
 
   Future<void> _exportRecordPdf(EvidenceRecord record) async {
     final languageCode = Localizations.localeOf(context).languageCode;
-    final bytes = await _buildRecordPdfBytes(record, languageCode);
-    await Printing.layoutPdf(onLayout: (_) async => bytes);
-    unawaited(
-      EvidenceBackendService.logPdfAction(
-        record: record,
-        action: 'export',
-        fileName: '${_pdfSafeName(record.title)}_${record.id}.pdf',
-        fileSizeBytes: bytes.length,
-        locale: languageCode,
-      ),
-    );
+    try {
+      final file = await _writeRecordPdfFile(record, languageCode);
+      final bytes = await file.readAsBytes();
+      await Printing.layoutPdf(
+        name: _recordPdfFileName(record),
+        onLayout: (_) async => bytes,
+      );
+      final fileSize = await file.length();
+      unawaited(
+        EvidenceBackendService.logPdfAction(
+          record: record,
+          action: 'export',
+          fileName: _recordPdfFileName(record),
+          fileSizeBytes: fileSize,
+          locale: languageCode,
+        ),
+      );
+      await showAppToast('PDF 내보내기 화면을 열었습니다.');
+    } catch (_) {
+      await showAppToast('PDF 내보내기에 실패했습니다. 다시 시도해 주세요.');
+    }
   }
 
   Future<void> _shareRecordPdf(EvidenceRecord record) async {
     final languageCode = Localizations.localeOf(context).languageCode;
-    final file = await _writeRecordPdfFile(record, languageCode);
-    await SharePlus.instance.share(
-      ShareParams(
-        text: record.title,
-        files: [XFile(file.path)],
-      ),
-    );
-    final fileSize = await file.length();
-    unawaited(
-      EvidenceBackendService.logPdfAction(
-        record: record,
-        action: 'share',
-        fileName: file.path.split(Platform.pathSeparator).last,
-        fileSizeBytes: fileSize,
-        locale: languageCode,
-      ),
-    );
+    try {
+      final file = await _writeRecordPdfFile(record, languageCode);
+      final result = await SharePlus.instance.share(
+        ShareParams(
+          title: record.title,
+          text: record.title,
+          subject: record.title,
+          files: [XFile(file.path)],
+        ),
+      );
+      if (result.status == ShareResultStatus.dismissed) {
+        return;
+      }
+      final fileSize = await file.length();
+      unawaited(
+        EvidenceBackendService.logPdfAction(
+          record: record,
+          action: 'share',
+          fileName: file.path.split(Platform.pathSeparator).last,
+          fileSizeBytes: fileSize,
+          locale: languageCode,
+        ),
+      );
+      await showAppToast('PDF 공유 화면을 열었습니다.');
+    } catch (_) {
+      await showAppToast('PDF 공유에 실패했습니다. 다시 시도해 주세요.');
+    }
+  }
+
+  Future<void> _handleBackPressed() async {
+    if (_selectedPage == 4) {
+      setState(() {
+        _editingRecord = null;
+        _embeddedEditorSaving = false;
+        _selectedPage = _editorReturnPage;
+      });
+      return;
+    }
+
+    final now = DateTime.now();
+    if (_lastBackPressedAt == null || now.difference(_lastBackPressedAt!) > const Duration(seconds: 2)) {
+      _lastBackPressedAt = now;
+      await showAppToast('뒤로가기를 한 번 더 누르면 앱이 종료됩니다.');
+      return;
+    }
+
+    await SystemNavigator.pop();
   }
 
   @override
   Widget build(BuildContext context) {
     final filteredRecords = _filteredRecords;
     final sortedRecords = _sortedRecords;
+    final bottomOverlayHeight = _kBottomNavSectionHeight + _bannerHeight + MediaQuery.paddingOf(context).bottom;
     final unresolvedAmount = _records
         .where((record) => record.status != PromiseStatus.completed)
         .fold<double>(0, (sum, item) => sum + (item.amount ?? 0));
@@ -609,9 +678,15 @@ class _EvidenceHomePageState extends State<EvidenceHomePage> {
       ),
     ];
 
-    return Scaffold(
-      backgroundColor: const Color(0xFFF4F7FB),
-      appBar: AppBar(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        unawaited(_handleBackPressed());
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFFF4F7FB),
+        appBar: AppBar(
         toolbarHeight: 92,
         backgroundColor: const Color(0xFFF4F7FB),
         surfaceTintColor: Colors.transparent,
@@ -665,42 +740,54 @@ class _EvidenceHomePageState extends State<EvidenceHomePage> {
               ]
             : null,
       ),
-      body: Stack(
-        children: [
-          const _EvidenceBackdrop(),
-          SafeArea(
-            top: true,
-            bottom: false,
-            child: IndexedStack(
-              index: _selectedPage,
-              children: pages,
-            ),
-          ),
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: Material(
-              color: Colors.transparent,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _EvidenceBottomNav(
-                    selectedIndex: _selectedPage,
-                    onAdd: _openComposerInPlace,
-                    onSelected: (index) => setState(() => _selectedPage = index),
-                    items: const [
-                      _EvidenceNavItemData(label: 'home', icon: Icons.home_rounded, color: Color(0xFF183B56)),
-                      _EvidenceNavItemData(label: 'records', icon: Icons.sticky_note_2_rounded, color: Color(0xFF183B56)),
-                      _EvidenceNavItemData(label: 'calendar', icon: Icons.calendar_month_rounded, color: Color(0xFF183B56)),
-                      _EvidenceNavItemData(label: 'timeline', icon: Icons.timeline_rounded, color: Color(0xFF183B56)),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  const _AdMobBannerBar(),
-                ],
+        body: _BottomOverlayScope(
+          overlayHeight: bottomOverlayHeight,
+          child: Stack(
+            children: [
+              const _EvidenceBackdrop(),
+              SafeArea(
+                top: true,
+                bottom: false,
+                child: IndexedStack(
+                  index: _selectedPage,
+                  children: pages,
+                ),
               ),
-            ),
+              Align(
+                alignment: Alignment.bottomCenter,
+                child: SafeArea(
+                  top: false,
+                  child: Material(
+                    color: Colors.transparent,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _EvidenceBottomNav(
+                          selectedIndex: _selectedPage,
+                          onAdd: _openComposerInPlace,
+                          onSelected: (index) => setState(() => _selectedPage = index),
+                          items: const [
+                            _EvidenceNavItemData(label: 'home', icon: Icons.home_rounded, color: Color(0xFF183B56)),
+                            _EvidenceNavItemData(label: 'records', icon: Icons.sticky_note_2_rounded, color: Color(0xFF183B56)),
+                            _EvidenceNavItemData(label: 'calendar', icon: Icons.calendar_month_rounded, color: Color(0xFF183B56)),
+                            _EvidenceNavItemData(label: 'timeline', icon: Icons.timeline_rounded, color: Color(0xFF183B56)),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        _AdMobBannerBar(
+                          onHeightChanged: (height) {
+                            if (_bannerHeight == height || !mounted) return;
+                            setState(() => _bannerHeight = height);
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -864,7 +951,7 @@ class _OverviewPage extends StatelessWidget {
           orElse: () => records.isNotEmpty ? records.first : null,
         );
     return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 8, 20, 170),
+      padding: EdgeInsets.fromLTRB(20, 8, 20, _bottomOverlayInset(context)),
       children: [
         _HeroHeaderCard(
           unresolvedAmount: unresolvedAmount,
@@ -948,7 +1035,7 @@ class _RecordsPage extends StatelessWidget {
     final languageCode = Localizations.localeOf(context).languageCode;
     if (records.isEmpty) {
       return Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 170),
+        padding: EdgeInsets.fromLTRB(20, 12, 20, _bottomOverlayInset(context)),
         child: _EmptyState(
           title: tr(context, ko: '아직 기록이 없습니다', en: 'No records yet'),
           body: tr(context, ko: '새 기록을 만들면 거래/약속/증거가 타임라인으로 정리됩니다.', en: 'Create your first record to organize promises, transactions, and evidence in a timeline.'),
@@ -1057,7 +1144,7 @@ class _ActivityPage extends StatelessWidget {
     final totalEvents = records.fold<int>(0, (sum, record) => sum + record.timeline.length);
     if (totalEvents == 0) {
       return Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 170),
+        padding: EdgeInsets.fromLTRB(20, 12, 20, _bottomOverlayInset(context)),
         child: _EmptyState(
           title: tr(context, ko: '타임라인이 비어 있습니다', en: 'Timeline is empty'),
           body: tr(context, ko: '기록을 저장하면 생성·수정·증거 첨부 이력이 직설적으로 쌓입니다.', en: 'Once you save records, creation, edits, and attachments will build up here.'),
@@ -1169,7 +1256,7 @@ class _CalendarPageState extends State<_CalendarPage> {
         ),
         Expanded(
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 170),
+            padding: EdgeInsets.fromLTRB(20, 0, 20, _bottomOverlayInset(context)),
             children: [
               ClipRRect(
                 borderRadius: BorderRadius.circular(28),
@@ -1324,17 +1411,17 @@ class _HeroHeaderCard extends StatelessWidget {
           child: Stack(
             children: [
               Positioned(
-                right: -34,
-                top: -18,
+                right: 6,
+                top: 6,
                 child: Container(
-                  width: 180,
-                  height: 180,
+                  width: 168,
+                  height: 168,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: Colors.white.withValues(alpha: 0.08),
                   ),
-                  ),
                 ),
+              ),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -2481,7 +2568,9 @@ class _EvidenceNavItemData {
 }
 
 class _AdMobBannerBar extends StatefulWidget {
-  const _AdMobBannerBar();
+  const _AdMobBannerBar({this.onHeightChanged});
+
+  final ValueChanged<double>? onHeightChanged;
 
   @override
   State<_AdMobBannerBar> createState() => _AdMobBannerBarState();
@@ -2491,6 +2580,7 @@ class _AdMobBannerBarState extends State<_AdMobBannerBar> {
   BannerAd? _bannerAd;
   bool _loaded = false;
   int? _loadedWidth;
+  double _reportedHeight = -1;
 
   String get _fallbackAdUnitId {
     if (Platform.isAndroid) return 'ca-app-pub-3940256099942544/6300978111';
@@ -2573,6 +2663,7 @@ class _AdMobBannerBarState extends State<_AdMobBannerBar> {
 
   @override
   void dispose() {
+    widget.onHeightChanged?.call(0);
     _bannerAd?.dispose();
     super.dispose();
   }
@@ -2582,14 +2673,18 @@ class _AdMobBannerBarState extends State<_AdMobBannerBar> {
     if (_loadedWidth != MediaQuery.sizeOf(context).width.truncate()) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _loadBanner());
     }
-    return SafeArea(
-      top: false,
-      minimum: EdgeInsets.zero,
-      child: SizedBox(
-        width: double.infinity,
-        height: _loaded && _bannerAd != null ? _bannerAd!.size.height.toDouble() : 0,
-        child: _loaded && _bannerAd != null ? AdWidget(ad: _bannerAd!) : const SizedBox.shrink(),
-      ),
+    final double currentHeight = _loaded && _bannerAd != null ? _bannerAd!.size.height.toDouble() : 0.0;
+    if (_reportedHeight != currentHeight) {
+      _reportedHeight = currentHeight;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        widget.onHeightChanged?.call(currentHeight);
+      });
+    }
+    return SizedBox(
+      width: double.infinity,
+      height: currentHeight,
+      child: _loaded && _bannerAd != null ? AdWidget(ad: _bannerAd!) : const SizedBox.shrink(),
     );
   }
 }
@@ -2826,7 +2921,7 @@ class _PromiseListTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(20, 4, 20, 170),
+      padding: EdgeInsets.fromLTRB(20, 4, 20, _bottomOverlayInset(context)),
       itemCount: records.length,
       separatorBuilder: (_, __) => const SizedBox(height: 12),
       itemBuilder: (context, index) {
@@ -2850,6 +2945,13 @@ class _PromiseListTab extends StatelessWidget {
                         ),
                       ),
                       PopupMenuButton<String>(
+                        color: Colors.white,
+                        surfaceTintColor: Colors.white,
+                        position: PopupMenuPosition.under,
+                        offset: const Offset(0, 6),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                        menuPadding: const EdgeInsets.symmetric(vertical: 6),
+                        icon: const Icon(Icons.more_horiz_rounded, color: Color(0xFF17203A)),
                         onSelected: (value) {
                           if (value == 'edit') {
                             onOpen(existing: record);
@@ -2862,10 +2964,22 @@ class _PromiseListTab extends StatelessWidget {
                           }
                         },
                         itemBuilder: (_) => const [
-                          PopupMenuItem(value: 'edit', child: Text('수정')),
-                          PopupMenuItem(value: 'export_pdf', child: Text('PDF 내보내기')),
-                          PopupMenuItem(value: 'share_pdf', child: Text('PDF 공유')),
-                          PopupMenuItem(value: 'delete', child: Text('삭제')),
+                          PopupMenuItem(
+                            value: 'edit',
+                            child: Text('수정', style: TextStyle(color: Color(0xFF17203A), fontWeight: FontWeight.w600)),
+                          ),
+                          PopupMenuItem(
+                            value: 'export_pdf',
+                            child: Text('PDF 내보내기', style: TextStyle(color: Color(0xFF17203A), fontWeight: FontWeight.w600)),
+                          ),
+                          PopupMenuItem(
+                            value: 'share_pdf',
+                            child: Text('PDF 공유', style: TextStyle(color: Color(0xFF17203A), fontWeight: FontWeight.w600)),
+                          ),
+                          PopupMenuItem(
+                            value: 'delete',
+                            child: Text('삭제', style: TextStyle(color: Color(0xFFC62839), fontWeight: FontWeight.w700)),
+                          ),
                         ],
                       ),
                     ],
@@ -2942,7 +3056,7 @@ class _TimelineTab extends StatelessWidget {
     }
 
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(20, 4, 20, 120),
+      padding: EdgeInsets.fromLTRB(20, 4, 20, _bottomOverlayInset(context)),
       itemCount: events.length,
       separatorBuilder: (_, __) => const SizedBox(height: 10),
       itemBuilder: (context, index) {
@@ -3597,7 +3711,12 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
         builder: (context, constraints) {
           final isWide = constraints.maxWidth >= 760;
           return ListView(
-            padding: EdgeInsets.fromLTRB(20, widget.embedded ? 16 : 12, 20, widget.embedded ? 176 : 156),
+            padding: EdgeInsets.fromLTRB(
+              20,
+              widget.embedded ? 16 : 12,
+              20,
+              widget.embedded ? _bottomOverlayInset(context) : _kEditorBottomPadding,
+            ),
             children: [
               _section(
                 title: '핵심 정보',
@@ -3614,13 +3733,41 @@ class _EvidenceEditorPageState extends State<EvidenceEditorPage> {
                           Expanded(child: _textField(_counterpartyController, '상대 이름')),
                           const SizedBox(width: 12),
                           Expanded(child: _textField(_amountController, '금액', hint: '500000', keyboardType: TextInputType.number)),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _textField(
+                              _lossRateController,
+                              '일일 손해율',
+                              hint: '0.0008',
+                              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            ),
+                          ),
                         ],
                       )
                     else ...[
                       _textField(_counterpartyController, '상대 이름'),
                       const SizedBox(height: 12),
                       _textField(_amountController, '금액', hint: '500000', keyboardType: TextInputType.number),
+                      const SizedBox(height: 12),
+                      _textField(
+                        _lossRateController,
+                        '일일 손해율',
+                        hint: '0.0008',
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      ),
                     ],
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        '예: 0.0008 = 하루 0.08%, 만기일이 지나면 이 비율로 손해 추정을 계산합니다.',
+                        style: const TextStyle(
+                          color: Color(0xFF66718F),
+                          height: 1.4,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
                     const SizedBox(height: 12),
                     Row(
                       children: [

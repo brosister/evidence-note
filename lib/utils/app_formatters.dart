@@ -40,8 +40,12 @@ String formatAmount(double value) {
 
 LossEstimate estimateLoss(EvidenceRecord record) {
   final amount = record.amount ?? 0;
-  final days = max(0, DateTime.now().difference(record.eventAt).inDays);
+  final baseDate = record.dueAt ?? record.eventAt;
+  final days = max(0, DateTime.now().difference(baseDate).inDays);
   final loss = amount * record.dailyLossRate * days;
+  if (record.dueAt != null && days == 0 && DateTime.now().isBefore(record.dueAt!)) {
+    return const LossEstimate(days: 0, amount: 0, message: '아직 만기 전입니다.');
+  }
   return LossEstimate(days: days, amount: loss, message: '지금까지 $days일 지연 → 손해 ${formatAmount(loss)} 추정');
 }
 
